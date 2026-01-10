@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -16,6 +17,8 @@ from app.settings import settings
 from app.strategies.models import StrategyName
 from app.strategies.strategy_fabric import resolve_strategy
 from storage.state_store import StateStore
+
+logger = logging.getLogger(__name__)
 
 
 def _json_response(data: Any, status: int = 200) -> web.Response:
@@ -322,73 +325,73 @@ INDEX_HTML = """<!doctype html>
   <body>
     <div class="header">
       <h1>Semantix AI Trading</h1>
-      <div class="subtitle">Monitoring & manual control • No authentication (MVP)</div>
+      <div class="subtitle">Мониторинг и ручное управление • Без авторизации (MVP)</div>
     </div>
     <div class="container">
       <div class="row">
         <div class="card fade-in">
-          <h3>🔐 Credentials</h3>
-          <div class="muted">Token stored in memory only (not persisted)</div>
+          <h3>🔐 Доступ</h3>
+          <div class="muted">Токен хранится только в памяти (не сохраняется)</div>
           <div class="status-grid">
             <div class="status-item">
-              <span class="status-label">Token</span>
+              <span class="status-label">Токен</span>
               <span class="status-value" id="tokenSet">?</span>
             </div>
           </div>
-          <input id="tokenInput" placeholder="Broker API token" type="password" />
-          <input id="accountInput" placeholder="ACCOUNT_ID (optional)" />
+          <input id="tokenInput" placeholder="API-токен брокера" type="password" />
+          <input id="accountInput" placeholder="ACCOUNT_ID (опционально)" />
           <div class="btn-group">
-            <button class="success" onclick="setCredentials()">Set API Token</button>
+            <button class="success" onclick="setCredentials()">Установить токен</button>
           </div>
         </div>
         <div class="card fade-in">
-          <h3>⚙️ Controls</h3>
+          <h3>⚙️ Управление</h3>
           <div class="status-grid">
             <div class="status-item">
-              <span class="status-label">Trading</span>
+              <span class="status-label">Торговля</span>
               <span class="status-value" id="tradingEnabled">?</span>
             </div>
             <div class="status-item">
-              <span class="status-label">Kill-switch</span>
+              <span class="status-label">Стоп-кран</span>
               <span class="status-value" id="killSwitchStatus">?</span>
             </div>
           </div>
           <div class="btn-group">
-            <button class="success" onclick="resume()">▶ Resume</button>
-            <button class="warning" onclick="pause()">⏸ Pause</button>
-            <button onclick="setCooldown()">⏱ Cooldown 5m</button>
-            <button class="danger" onclick="toggleKillSwitch()">🛑 Kill-switch</button>
-            <button onclick="refreshOpenOrders()">🔄 Refresh Orders</button>
-            <button onclick="reconcile()">🔁 Reconcile</button>
+            <button class="success" onclick="resume()">▶ Возобновить</button>
+            <button class="warning" onclick="pause()">⏸ Пауза</button>
+            <button onclick="setCooldown()">⏱ Кулдаун 5 мин</button>
+            <button class="danger" onclick="toggleKillSwitch()">🛑 Стоп-кран</button>
+            <button onclick="refreshOpenOrders()">🔄 Обновить ордера</button>
+            <button onclick="reconcile()">🔁 Сверка</button>
           </div>
         </div>
         <div class="card fade-in">
-          <h3>📊 Status</h3>
+          <h3>📊 Статус</h3>
           <div class="status-grid">
             <div class="status-item">
-              <span class="status-label">Sandbox</span>
+              <span class="status-label">Песочница</span>
               <span class="status-value" id="sandbox">?</span>
             </div>
             <div class="status-item">
-              <span class="status-label">Account</span>
+              <span class="status-label">Аккаунт</span>
               <span class="status-value" id="account">?</span>
             </div>
             <div class="status-item">
-              <span class="status-label">Time (UTC)</span>
+              <span class="status-label">Время (UTC)</span>
               <span class="status-value" id="now">?</span>
             </div>
           </div>
         </div>
         <div class="card fade-in">
-          <h3>💰 Broker Live</h3>
-          <div class="muted">Real-time portfolio data</div>
+          <h3>💰 Данные брокера (live)</h3>
+          <div class="muted">Данные портфеля в реальном времени</div>
           <div class="status-grid">
             <div class="status-item">
-              <span class="status-label">Portfolio</span>
+              <span class="status-label">Портфель</span>
               <span class="status-value" id="liveTotal">?</span>
             </div>
             <div class="status-item">
-              <span class="status-label">Cash</span>
+              <span class="status-label">Деньги</span>
               <span class="status-value" id="liveCash">?</span>
             </div>
           </div>
@@ -397,11 +400,11 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
-          <h3>🎯 Trading Jobs</h3>
-          <div class="muted">Trading does not start until you press <b>Start</b>. Choose mode: <code>sandbox</code> or <code>real</code>.</div>
+          <h3>🎯 Торговые джобы</h3>
+          <div class="muted">Торговля не начнётся, пока вы не нажмёте <b>Старт</b>. Выберите режим: <code>sandbox</code> или <code>real</code>.</div>
           <div class="table-container">
             <table id="jobsTbl">
-              <thead><tr><th>Job ID</th><th>FIGI</th><th>Strategy</th><th>Status</th><th>Mode</th><th>Action</th></tr></thead>
+              <thead><tr><th>Job ID</th><th>FIGI</th><th>Стратегия</th><th>Статус</th><th>Режим</th><th>Действие</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -410,11 +413,11 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
-          <h3>📈 Strategies</h3>
-          <div class="muted">Configured strategies with last processed timestamps</div>
+          <h3>📈 Стратегии</h3>
+          <div class="muted">Сконфигурированные стратегии и время последней обработки</div>
           <div class="table-container">
             <table id="strategiesTbl">
-              <thead><tr><th>FIGI</th><th>Strategy</th><th>Type</th><th>Last Processed</th></tr></thead>
+              <thead><tr><th>FIGI</th><th>Стратегия</th><th>Тип</th><th>Последняя обработка</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -423,10 +426,10 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
-          <h3>💼 Open Positions</h3>
+          <h3>💼 Открытые позиции</h3>
           <div class="table-container">
             <table id="positionsTbl">
-              <thead><tr><th>FIGI</th><th>Quantity</th><th>Avg Price</th><th>Updated</th></tr></thead>
+              <thead><tr><th>FIGI</th><th>Количество</th><th>Средняя цена</th><th>Обновлено</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -435,11 +438,11 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
-          <h3>📋 Orders (Latest)</h3>
-          <div class="muted">Recent orders from state.db</div>
+          <h3>📋 Ордера (последние)</h3>
+          <div class="muted">Последние ордера из state.db</div>
           <div class="table-container">
             <table id="ordersTbl">
-              <thead><tr><th>Order ID</th><th>FIGI</th><th>Side</th><th>Qty</th><th>Status</th><th>Created</th></tr></thead>
+              <thead><tr><th>ID ордера</th><th>FIGI</th><th>Сторона</th><th>Кол-во</th><th>Статус</th><th>Создан</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -448,11 +451,11 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
-          <h3>✅ Fills (Latest)</h3>
-          <div class="muted">Order executions</div>
+          <h3>✅ Исполнения (последние)</h3>
+          <div class="muted">Исполненные сделки</div>
           <div class="table-container">
             <table id="fillsTbl">
-              <thead><tr><th>Client Order ID</th><th>Broker Order ID</th><th>FIGI</th><th>Side</th><th>Qty</th><th>Price</th><th>Time</th></tr></thead>
+              <thead><tr><th>Client Order ID</th><th>Broker Order ID</th><th>FIGI</th><th>Сторона</th><th>Кол-во</th><th>Цена</th><th>Время</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -461,11 +464,11 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
-          <h3>🌐 Broker Open Orders (Live)</h3>
-          <div class="muted">Current open orders from broker API</div>
+          <h3>🌐 Открытые ордера брокера (live)</h3>
+          <div class="muted">Текущие открытые ордера из API брокера</div>
           <div class="table-container">
             <table id="brokerOrdersTbl">
-              <thead><tr><th>Order ID</th><th>FIGI</th><th>Direction</th><th>Lots</th><th>Status</th></tr></thead>
+              <thead><tr><th>ID ордера</th><th>FIGI</th><th>Направление</th><th>Лоты</th><th>Статус</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -544,12 +547,12 @@ INDEX_HTML = """<!doctype html>
           const tokenSet = !!st.token_set;
           
           // Status updates with badges
-          document.getElementById('sandbox').innerHTML = st.sandbox ? badge('Yes', 'success') : badge('No', 'warning');
-          document.getElementById('account').textContent = st.account_id || 'Not set';
+          document.getElementById('sandbox').innerHTML = st.sandbox ? badge('Да', 'success') : badge('Нет', 'warning');
+          document.getElementById('account').textContent = st.account_id || 'Не задан';
           document.getElementById('now').textContent = formatDate(st.now);
-          document.getElementById('tradingEnabled').innerHTML = st.trading_enabled ? badge('Enabled', 'success') : badge('Disabled', 'danger');
-          document.getElementById('tokenSet').innerHTML = st.token_set ? badge('Set', 'success') : badge('Not set', 'danger');
-          document.getElementById('killSwitchStatus').innerHTML = st.kill_switch_active ? badge('ACTIVE', 'danger') : badge('Inactive', 'success');
+          document.getElementById('tradingEnabled').innerHTML = st.trading_enabled ? badge('Включена', 'success') : badge('Остановлена', 'danger');
+          document.getElementById('tokenSet').innerHTML = st.token_set ? badge('Установлен', 'success') : badge('Не задан', 'danger');
+          document.getElementById('killSwitchStatus').innerHTML = st.kill_switch_active ? badge('АКТИВЕН', 'danger') : badge('Не активен', 'success');
 
           // Jobs table
           const jobs = await jget('/api/jobs');
@@ -559,7 +562,7 @@ INDEX_HTML = """<!doctype html>
             for (const j of jobs.items) {
               const tr = document.createElement('tr');
               tr.className = 'fade-in';
-              const statusBadge = j.status === 'running' ? badge('Running', 'success') : badge('Stopped', 'danger');
+              const statusBadge = j.status === 'running' ? badge('Работает', 'success') : badge('Остановлена', 'danger');
               const modeBadge = j.mode ? badge(j.mode.toUpperCase(), j.mode === 'real' ? 'danger' : 'info') : badge('—', 'warning');
               tr.innerHTML = `<td><code>${j.job_id}</code></td><td><code>${j.figi}</code></td><td>${j.strategy}</td><td>${statusBadge}</td><td></td><td></td>`;
 
@@ -589,32 +592,32 @@ INDEX_HTML = """<!doctype html>
 
               const btn = document.createElement('button');
               btn.className = j.status === 'running' ? 'danger' : 'success';
-              btn.textContent = j.status === 'running' ? '⏹ Stop' : '▶ Start';
+              btn.textContent = j.status === 'running' ? '⏹ Стоп' : '▶ Старт';
               if (j.status !== 'running' && !tokenSet) {
                 btn.disabled = true;
                 btn.style.opacity = '0.5';
                 btn.style.cursor = 'not-allowed';
-                btn.title = 'Set API Token first';
+                btn.title = 'Сначала установите токен';
                 modeSel.disabled = true;
                 modeSel.style.opacity = '0.6';
               }
               btn.onclick = async () => {
                 if (j.status === 'running') {
                   const res = await jpost('/api/jobs/stop', { job_id: j.job_id });
-                  if (res && res.ok === false) alert(res.error || 'Failed to stop job');
+                  if (res && res.ok === false) alert(res.error || 'Не удалось остановить джобу');
                 } else {
                   if (!tokenSet) {
-                    alert('Set API Token first (Credentials card).');
+                    alert('Сначала установите токен (карточка "Доступ").');
                     return;
                   }
                   const mode = modeSel.value || state.get('job_mode', 'sandbox');
                   if (mode === 'real') {
-                    const ok = window.confirm('REAL trading mode selected. This will place real orders. Continue?');
+                    const ok = window.confirm('Выбран REAL режим. Будут выставляться реальные ордера. Продолжить?');
                     if (!ok) return;
                   }
                   const res = await jpost('/api/jobs/start', { job_id: j.job_id, sandbox: mode === 'sandbox', confirm: mode === 'real' });
                   if (res && res.ok === false) {
-                    alert(res.error || 'Failed to start job');
+                    alert(res.error || 'Не удалось запустить джобу');
                     return;
                   }
                 }
@@ -629,7 +632,7 @@ INDEX_HTML = """<!doctype html>
           const strategies = await jget('/api/strategies');
           fillTable('strategiesTbl', strategies.items, ['figi', 'strategy', 'instrument_type', 'last_processed'], {
             figi: v => `<code>${v}</code>`,
-            last_processed: v => v ? formatDate(v) : badge('Never', 'warning')
+            last_processed: v => v ? formatDate(v) : badge('Никогда', 'warning')
           });
 
           // Positions
@@ -649,9 +652,9 @@ INDEX_HTML = """<!doctype html>
             side: v => v === 'buy' ? badge('BUY', 'success') : badge('SELL', 'danger'),
             status: v => {
               const s = String(v).toLowerCase();
-              if (s.includes('fill')) return badge('Filled', 'success');
-              if (s.includes('cancel') || s.includes('reject')) return badge('Failed', 'danger');
-              return badge('Pending', 'warning');
+              if (s.includes('fill')) return badge('Исполнен', 'success');
+              if (s.includes('cancel') || s.includes('reject')) return badge('Ошибка', 'danger');
+              return badge('В процессе', 'warning');
             },
             created_at: formatDate
           });
@@ -678,9 +681,9 @@ INDEX_HTML = """<!doctype html>
             },
             execution_report_status: v => {
               const s = String(v).toLowerCase();
-              if (s.includes('fill')) return badge('Filled', 'success');
-              if (s.includes('cancel') || s.includes('reject')) return badge('Failed', 'danger');
-              return badge('Pending', 'warning');
+              if (s.includes('fill')) return badge('Исполнен', 'success');
+              if (s.includes('cancel') || s.includes('reject')) return badge('Ошибка', 'danger');
+              return badge('В процессе', 'warning');
             }
           });
 
@@ -721,7 +724,7 @@ INDEX_HTML = """<!doctype html>
         const token = document.getElementById('tokenInput').value;
         const account_id = document.getElementById('accountInput').value;
         if (!token) {
-          alert('Token is required');
+          alert('Токен обязателен');
           return;
         }
         try {
@@ -731,7 +734,7 @@ INDEX_HTML = """<!doctype html>
           state.set('last_account_id', account_id);
           await refresh();
         } catch (err) {
-          alert('Failed to set credentials: ' + (err.message || 'Unknown error'));
+          alert('Не удалось сохранить доступ: ' + (err.message || 'Неизвестная ошибка'));
         }
       }
 
@@ -788,7 +791,9 @@ class UiServer:
             return self._cached_account_id
         try:
             resp = await broker_client.get_accounts()
-            self._cached_account_id = resp.accounts[0].id if resp.accounts else None
+            self._cached_account_id = resp.accounts[0].id if getattr(resp, "accounts", None) else None
+            if self._cached_account_id:
+                settings.account_id = self._cached_account_id
             return self._cached_account_id
         except Exception:  # noqa: BLE001
             return None
@@ -836,11 +841,19 @@ class UiServer:
 
         # Update runtime credentials (memory only).
         # Initialize in SANDBOX mode by default for safety; job start can switch mode.
+        logger.info("credentials set via UI (account_id=%s, sandbox_default=true)", account_id)
         await broker_client.set_credentials(token=token, sandbox=True)
         await broker_client.ainit()
         settings.token = token
         if account_id:
             settings.account_id = account_id
+            self._cached_account_id = account_id
+        else:
+            # Best-effort: resolve account automatically (also creates sandbox account if needed)
+            try:
+                self._cached_account_id = await self._account_id()
+            except Exception:  # noqa: BLE001
+                pass
         # do not ever return token back
         return _json_response({"ok": True, "account_id": settings.account_id, "sandbox": settings.sandbox})
 
@@ -857,10 +870,92 @@ class UiServer:
         return _json_response({"items": items})
 
     async def handle_job_start(self, request: web.Request) -> web.Response:
-        body = await request.json()
-        jid = body.get("job_id")
-        sandbox = bool(body.get("sandbox", True))
-        confirm = bool(body.get("confirm", False))
+        try:
+            body = await request.json()
+            jid = body.get("job_id")
+            sandbox = bool(body.get("sandbox", True))
+            confirm = bool(body.get("confirm", False))
+            logger.info("job_start requested jid=%s sandbox=%s confirm=%s", jid, sandbox, confirm)
+
+            if not settings.token:
+                return _json_response({"ok": False, "error": "Сначала установите токен в «Доступ»."}, status=400)
+
+            if jid not in self._job_defs:
+                return _json_response({"ok": False, "error": "unknown job_id"}, status=404)
+            if not broker_client.credentials_set():
+                return _json_response({"ok": False, "error": "set token first"}, status=400)
+            t = self._jobs.get(jid)
+            if t is not None and not t.done():
+                return _json_response({"ok": True, "status": "already_running"})
+
+            # Safety: do not allow real trading unless explicitly enabled in env + confirmed in UI.
+            if not sandbox:
+                if not settings.i_know_what_i_am_doing:
+                    return _json_response(
+                        {
+                            "ok": False,
+                            "error": "Реальная торговля заблокирована. Установите I_KNOW_WHAT_I_AM_DOING=true в окружении.",
+                        },
+                        status=403,
+                    )
+                if not confirm:
+                    return _json_response({"ok": False, "error": "Требуется подтверждение для real режима"}, status=400)
+
+            # Disallow mixing sandbox/real jobs in one process (shared broker client).
+            for running_jid, task in self._jobs.items():
+                if task is not None and not task.done():
+                    running_mode = self._job_modes.get(running_jid, True)
+                    if running_mode != sandbox:
+                        return _json_response(
+                            {
+                                "ok": False,
+                                "error": "Нельзя одновременно запускать sandbox и real джобы в одном процессе.",
+                            },
+                            status=409,
+                        )
+
+            # Switch broker client mode for this job.
+            await broker_client.set_credentials(token=settings.token, sandbox=sandbox)  # type: ignore[arg-type]
+            await broker_client.ainit()
+
+            meta = self._job_defs[jid]
+            figi = meta["figi"]
+            strat: StrategyName = meta["strategy"]
+
+            # Create strategy instance with same args as legacy main (but no autostart).
+            from app.instruments_config.parser import instruments_config as cfg
+
+            inst_cfg = next(i for i in cfg.instruments if i.figi == figi and i.strategy.name == strat)
+            extra_kwargs = {}
+            if strat == StrategyName.INTERVAL:
+                extra_kwargs = dict(inst_cfg.strategy.parameters)
+            strategy = resolve_strategy(
+                strategy_name=strat,
+                figi=figi,
+                instrument_config=inst_cfg,
+                global_risk=cfg.global_risk,
+                global_execution=cfg.global_execution,
+                strategy_params=inst_cfg.strategy.parameters,
+                **extra_kwargs,
+            )
+
+            async def _run_job():
+                try:
+                    logger.info("job_started jid=%s sandbox=%s figi=%s strategy=%s", jid, sandbox, figi, strat.value)
+                    await strategy.start()
+                except asyncio.CancelledError:
+                    logger.info("job_cancelled jid=%s", jid)
+                    raise
+                except Exception:  # noqa: BLE001
+                    logger.exception("job_crashed jid=%s", jid)
+                    raise
+
+            self._jobs[jid] = asyncio.create_task(_run_job())
+            self._job_modes[jid] = sandbox
+            return _json_response({"ok": True, "status": "started"})
+        except Exception:  # noqa: BLE001
+            logger.exception("handle_job_start failed")
+            return _json_response({"ok": False, "error": "Внутренняя ошибка сервера. Смотрите логи контейнера."}, status=500)
         if jid not in self._job_defs:
             return _json_response({"ok": False, "error": "unknown job_id"}, status=404)
         if not broker_client.credentials_set():
@@ -1024,7 +1119,12 @@ class UiServer:
     async def handle_broker_portfolio(self, request: web.Request) -> web.Response:
         aid = await self._account_id()
         if not aid:
-            return _json_response({"error": "account_id not resolved yet"}, status=503)
+            return _json_response(
+                {
+                    "error": "ACCOUNT_ID ещё не определён. Укажите ACCOUNT_ID в «Доступ» или используйте sandbox-аккаунт."
+                },
+                status=503,
+            )
         try:
             p = await broker_client.get_portfolio(account_id=aid)
             # keep only a few stable fields
@@ -1044,7 +1144,12 @@ class UiServer:
     async def handle_broker_open_orders(self, request: web.Request) -> web.Response:
         aid = await self._account_id()
         if not aid:
-            return _json_response({"error": "account_id not resolved yet"}, status=503)
+            return _json_response(
+                {
+                    "error": "ACCOUNT_ID ещё не определён. Укажите ACCOUNT_ID в «Доступ» или используйте sandbox-аккаунт."
+                },
+                status=503,
+            )
         try:
             resp = await broker_client.get_orders(account_id=aid)
             items = []
@@ -1161,7 +1266,21 @@ class UiServer:
 
 async def start_ui_server(*, store: StateStore, host: str, port: int) -> web.AppRunner:
     srv = UiServer(store=store)
-    app = web.Application()
+
+    @web.middleware
+    async def error_middleware(request: web.Request, handler):
+        try:
+            return await handler(request)
+        except web.HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("unhandled UI API error: %s %s", request.method, request.path)
+            return _json_response(
+                {"ok": False, "error": "Внутренняя ошибка сервера. Смотрите логи контейнера."},
+                status=500,
+            )
+
+    app = web.Application(middlewares=[error_middleware])
     app.router.add_get("/", srv.handle_index)
     app.router.add_get("/api/status", srv.handle_status)
     app.router.add_post("/api/credentials", srv.handle_credentials)

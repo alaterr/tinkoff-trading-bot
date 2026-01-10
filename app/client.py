@@ -82,8 +82,21 @@ class TinkoffClient:
 
     async def get_accounts(self):
         if self.sandbox:
-            return await self.client.sandbox.get_sandbox_accounts()
+            resp = await self.client.sandbox.get_sandbox_accounts()
+            # Sandbox may have 0 accounts until created.
+            if not getattr(resp, "accounts", None):
+                try:
+                    await self.client.sandbox.open_sandbox_account()
+                except Exception:
+                    pass
+                resp = await self.client.sandbox.get_sandbox_accounts()
+            return resp
         return await self.client.users.get_accounts()
+
+    async def open_sandbox_account(self):
+        if not self.sandbox:
+            raise RuntimeError("open_sandbox_account is only available in sandbox mode")
+        return await self.client.sandbox.open_sandbox_account()
 
     async def get_all_candles(self, **kwargs):
         if settings.use_candle_history_cache and self.market_data_cache is not None:
