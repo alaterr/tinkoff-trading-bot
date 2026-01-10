@@ -1218,8 +1218,22 @@ class UiServer:
 
             # Create strategy instance with same args as legacy main (but no autostart).
             from app.instruments_config.parser import instruments_config as cfg
+            # If job is created from UI, it may not exist in instruments_config.json.
+            if "params" in meta:
+                from app.instruments_config.models import InstrumentConfig, RolloverConfig, StrategyConfig
 
-            inst_cfg = next(i for i in cfg.instruments if i.figi == figi and i.strategy.name == strat)
+                inst_cfg = InstrumentConfig(
+                    figi=figi,
+                    instrument_type="futures",
+                    allow_short=True,
+                    allow_margin=False,
+                    max_position_qty=10,
+                    max_order_qty=5,
+                    rollover=RolloverConfig(enabled=False),
+                    strategy=StrategyConfig(name=strat, parameters=dict(meta.get("params") or {})),
+                )
+            else:
+                inst_cfg = next(i for i in cfg.instruments if i.figi == figi and i.strategy.name == strat)
             extra_kwargs = {}
             if strat == StrategyName.INTERVAL:
                 extra_kwargs = dict(inst_cfg.strategy.parameters)
