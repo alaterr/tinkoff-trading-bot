@@ -1999,7 +1999,69 @@ class UiServer:
                 ),
             )
             st = VwapMomentumStrategy(figi=figi, config=vm_cfg)
-            sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, strategy_name=strat.value)
+
+            # Risk-based sizing for dry-run:
+            # Strategy emits target_qty = +/-1 as direction; here we scale it to contracts using:
+            # qty = floor((risk_per_trade_pct * initial_equity) / stop_risk_per_contract_rub)
+            # stop_risk_per_contract_rub is derived from:
+            # - sl_points * tick_size (if available) * price_multiplier * lot
+            # - OR ATR * atr_sl_mult * price_multiplier * lot
+            def _norm_risk_pct(v: Decimal) -> Decimal:
+                return v / Decimal("100") if v >= Decimal("0.1") else v
+
+            # Limits: for UI jobs use stored meta values; for config jobs fall back to instrument_config.
+            inst_cfg = meta.get("instrument_config")
+            max_pos = int(meta.get("max_position_qty") or getattr(inst_cfg, "max_position_qty", None) or 10)
+
+            risk_frac = _norm_risk_pct(_to_decimal(p.get("risk_per_trade_pct", vm_cfg.risk_per_trade_pct)) or vm_cfg.risk_per_trade_pct)
+            risk_budget = bt_cfg.initial_equity * risk_frac
+            tick_size = f_spec.min_price_increment  # Decimal or None
+            pm = f_spec.price_multiplier
+            lot = Decimal(int(f_spec.lot or 1))
+
+            def _stop_risk_per_contract_rub(window) -> Optional[Decimal]:
+                # Fixed stop in points (interpreted as ticks if tick_size is known)
+                if vm_cfg.sl_points is not None and vm_cfg.sl_points > 0:
+                    dist = (vm_cfg.sl_points * tick_size) if (tick_size is not None and tick_size > 0) else vm_cfg.sl_points
+                    return dist * pm * lot
+                # ATR-based stop
+                if (
+                    vm_cfg.atr_sl_mult is not None
+                    and vm_cfg.atr_sl_mult > 0
+                    and len(window) >= int(vm_cfg.atr_period) + 2
+                ):
+                    from app.strategies.positional.indicators import atr
+
+                    a = atr(window, int(vm_cfg.atr_period))
+                    if a is None or a <= 0:
+                        return None
+                    dist = a * vm_cfg.atr_sl_mult
+                    return dist * pm * lot
+                return None
+
+            def sig_fn(w, pos):
+                sig = st.generate_signal(candles=w, current_position_qty=pos, strategy_name=strat.value)
+                if sig is None:
+                    return None
+                # Only size entries; exits keep 0
+                if pos == 0 and sig.target_qty != 0 and abs(int(sig.target_qty)) == 1:
+                    rs = _stop_risk_per_contract_rub(w)
+                    if rs is not None and rs > 0 and risk_budget > 0:
+                        qty = int((risk_budget / rs).to_integral_value(rounding="ROUND_FLOOR"))
+                        qty = max(1, qty)
+                        qty = min(qty, max_pos) if max_pos > 0 else qty
+                        from core.models.entities import Signal as CoreSignal
+
+                        return CoreSignal(
+                            strategy_name=sig.strategy_name,
+                            figi=sig.figi,
+                            ts=sig.ts,
+                            signal_type=sig.signal_type,
+                            target_qty=(qty if sig.target_qty > 0 else -qty),
+                            reason=f"{sig.reason} (sized qty={qty})",
+                            atr=sig.atr,
+                        )
+                return sig
 
             res = run_backtest_target_qty(figi=figi, strategy_name=strat.value, candles=candles, signal_fn=sig_fn, cfg=bt_cfg)
             summ = summarize(res.trades, res.equity)
@@ -2021,6 +2083,7 @@ class UiServer:
                         if f_spec.min_price_increment_amount is None
                         else str(f_spec.min_price_increment_amount),
                         "source": f_spec.source,
+                        "max_position_qty": max_pos,
                     },
                     "summary": {
                         "trades": summ.trades,
