@@ -14,4 +14,4 @@ data:
   PYTHONPATH: {{ .Values.env.PYTHONPATH | quote }}
   AUTO_START: {{ .Values.env.AUTO_START | quote }}
   instruments_config.json: |
-{{- .Values.instrumentsConfig | toJson | indent 4 }}
+{{- .Values.instrumentsConfig | toJson | nindent 4 }}
