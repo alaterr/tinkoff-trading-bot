@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from decimal import Decimal
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from core.models.entities import Candle
 

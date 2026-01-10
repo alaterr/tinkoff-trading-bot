@@ -13,8 +13,8 @@ from core.backtest.engine import BacktestConfig, run_backtest_target_qty
 from core.data.candles import CandleRepository
 from reports.stats import summarize
 from reports.trade_log import write_equity_csv, write_summary_json, write_trades_csv
-from strategies.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
-from strategies.ema_atr import EmaAtrTrendStrategy, EmaAtrConfig
+from app.strategies.positional.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
+from app.strategies.positional.ema_atr import EmaAtrTrendStrategy, EmaAtrConfig
 
 
 def _parse_dt(s: str) -> datetime:

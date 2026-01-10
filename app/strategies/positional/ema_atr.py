@@ -5,30 +5,30 @@ from decimal import Decimal
 from typing import List, Optional
 
 from core.models.entities import Candle, Signal, SignalType
-from strategies.indicators import atr, donchian_high, donchian_low
+from app.strategies.positional.indicators import atr, ema
 
 
 @dataclass(frozen=True)
-class DonchianAtrConfig:
-    breakout_lookback: int = 20
-    exit_lookback: int = 10
+class EmaAtrConfig:
+    ema_fast: int = 20
+    ema_slow: int = 50
     atr_period: int = 14
     atr_stop_mult: Decimal = Decimal("3")
-    # target position direction: +/-1 contracts (RiskGate can scale up)
+    cooldown_days: int = 5
     base_target_qty: int = 1
 
 
-class DonchianATRStrategy:
+class EmaAtrTrendStrategy:
     """
     D1 positional:
-    - Entry: close breaks above/below Donchian channel over breakout_lookback
-    - Exit: opposite channel break over exit_lookback OR ATR stop (tracked externally in v2)
+    - Long bias when close > EMA(slow) and EMA(fast) > EMA(slow)
+    - Short bias when close < EMA(slow) and EMA(fast) < EMA(slow)
+    - Exit on opposite bias; cooldown_days after exiting (tracked via state by runner/OMS layer)
 
-    MVP: produces target_qty = +/- base_target_qty or 0.
-    ATR is attached to Signal for RiskGate sizing.
+    MVP: returns target_qty (+/- base_target_qty or 0) and includes ATR for RiskGate sizing.
     """
 
-    def __init__(self, *, figi: str, config: DonchianAtrConfig):
+    def __init__(self, *, figi: str, config: EmaAtrConfig):
         self.figi = figi
         self.cfg = config
 
@@ -37,64 +37,67 @@ class DonchianATRStrategy:
         *,
         candles: List[Candle],
         current_position_qty: int,
-        strategy_name: str = "donchian_atr",
+        in_cooldown: bool,
+        strategy_name: str = "ema_atr",
     ) -> Optional[Signal]:
-        if len(candles) < max(self.cfg.breakout_lookback, self.cfg.exit_lookback) + 1:
+        if in_cooldown:
             return None
 
+        if len(candles) < max(self.cfg.ema_fast, self.cfg.ema_slow) + 1:
+            return None
+
+        closes = [c.close for c in candles]
+        efast = ema(closes, self.cfg.ema_fast)
+        eslow = ema(closes, self.cfg.ema_slow)
         last = candles[-1]
-        prev = candles[:-1]
-
-        hi = donchian_high(prev, self.cfg.breakout_lookback)
-        lo = donchian_low(prev, self.cfg.breakout_lookback)
-        if hi is None or lo is None:
-            return None
-
-        exit_hi = donchian_high(prev, self.cfg.exit_lookback)
-        exit_lo = donchian_low(prev, self.cfg.exit_lookback)
         a = atr(candles, self.cfg.atr_period)
 
-        # Exit first: if in position and reverse breakout on exit channel -> flat
-        if current_position_qty > 0 and exit_lo is not None and last.close < exit_lo:
+        fast = efast[-1]
+        slow = eslow[-1]
+
+        long_bias = last.close > slow and fast > slow
+        short_bias = last.close < slow and fast < slow
+
+        # Exit on opposite bias (or loss of bias)
+        if current_position_qty > 0 and not long_bias:
             return Signal(
                 strategy_name=strategy_name,
                 figi=self.figi,
                 ts=last.time,
                 signal_type=SignalType.TARGET_QTY,
                 target_qty=0,
-                reason="exit: close < donchian_low(exit_lookback)",
+                reason="exit: long bias invalidated",
                 atr=a,
             )
-        if current_position_qty < 0 and exit_hi is not None and last.close > exit_hi:
+        if current_position_qty < 0 and not short_bias:
             return Signal(
                 strategy_name=strategy_name,
                 figi=self.figi,
                 ts=last.time,
                 signal_type=SignalType.TARGET_QTY,
                 target_qty=0,
-                reason="exit: close > donchian_high(exit_lookback)",
+                reason="exit: short bias invalidated",
                 atr=a,
             )
 
-        # Entry: breakout
-        if last.close > hi:
+        if long_bias:
             return Signal(
                 strategy_name=strategy_name,
                 figi=self.figi,
                 ts=last.time,
                 signal_type=SignalType.TARGET_QTY,
                 target_qty=abs(self.cfg.base_target_qty),
-                reason="entry: close > donchian_high(breakout_lookback)",
+                reason="entry/hold: long bias",
                 atr=a,
             )
-        if last.close < lo:
+        if short_bias:
             return Signal(
                 strategy_name=strategy_name,
                 figi=self.figi,
                 ts=last.time,
                 signal_type=SignalType.TARGET_QTY,
                 target_qty=-abs(self.cfg.base_target_qty),
-                reason="entry: close < donchian_low(breakout_lookback)",
+                reason="entry/hold: short bias",
                 atr=a,
             )
 
