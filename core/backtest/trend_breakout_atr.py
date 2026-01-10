@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
 
-from app.strategies.positional.indicators import atr, donchian_high, donchian_low, ema
+from app.strategies.positional.indicators import adx, atr, donchian_high, donchian_low, ema
 from core.backtest.engine import BacktestConfig, _apply_slippage
 from core.backtest.futures import apply_futures_fill, futures_equity
 from core.models.entities import Candle
@@ -21,6 +21,10 @@ class TrendBreakoutParams:
     atr_stop_mult: Decimal
     atr_tp_mult: Decimal
     risk_per_trade_pct: Decimal  # can be "0.5" meaning 0.5%
+    breakout_buffer_atr: Decimal = Decimal("0")
+    adx_period: int = 14
+    adx_min: Decimal = Decimal("0")
+    cooldown_bars_after_loss: int = 0
 
 
 def _to_dt(s: str) -> datetime:
@@ -87,6 +91,7 @@ def run_backtest_trend_breakout_atr(
     entry: Optional[Decimal] = None
     stop: Optional[Decimal] = None
     tp: Optional[Decimal] = None
+    cooldown = 0
 
     trades: List[Trade] = []
     equity: List[EquityPoint] = []
@@ -143,6 +148,8 @@ def run_backtest_trend_breakout_atr(
                         pnl=cash - cash_before,
                     )
                 )
+                if (cash - cash_before) < 0 and params.cooldown_bars_after_loss > 0:
+                    cooldown = int(params.cooldown_bars_after_loss)
                 entry = stop = tp = None
                 mtm = futures_equity(cash=cash, pos=pos, avg_price=avg_price, price=c.close, price_multiplier=pm)
 
@@ -155,33 +162,47 @@ def run_backtest_trend_breakout_atr(
         upper = donchian_high(prev, params.breakout_lookback)
         lower = donchian_low(prev, params.breakout_lookback)
         a = atr(window, params.atr_period)
+        adx_v = adx(window, params.adx_period) if params.adx_min > 0 else None
 
         trend_dir = _trend_dir_for_ts(d1_ts=d1_ts, ema_vals=d1_ema, ts=c.time)
         target = pos
 
-        if upper is not None and lower is not None and a is not None and trend_dir != 0:
-            # Size
-            if risk_frac > 0 and a > 0 and params.atr_stop_mult > 0:
-                risk_budget = mtm * risk_frac
-                stop_dist = a * params.atr_stop_mult
-                per_contract_risk = stop_dist * pm
-                qty = int((risk_budget / per_contract_risk).to_integral_value(rounding="ROUND_FLOOR")) if per_contract_risk > 0 else 0
-                if qty <= 0:
-                    qty = 1
+        if pos == 0 and cooldown > 0:
+            cooldown -= 1
+        elif upper is not None and lower is not None and a is not None and trend_dir != 0:
+            if params.adx_min > 0 and (adx_v is None or adx_v < params.adx_min):
+                pass
             else:
-                qty = 1
+                # Size
+                if risk_frac > 0 and a > 0 and params.atr_stop_mult > 0:
+                    risk_budget = mtm * risk_frac
+                    stop_dist = a * params.atr_stop_mult
+                    per_contract_risk = stop_dist * pm
+                    qty = (
+                        int((risk_budget / per_contract_risk).to_integral_value(rounding="ROUND_FLOOR"))
+                        if per_contract_risk > 0
+                        else 0
+                    )
+                    if qty <= 0:
+                        qty = 1
+                else:
+                    qty = 1
 
-            # Entry
-            if c.close > upper and trend_dir > 0:
-                target = qty
-            elif c.close < lower and trend_dir < 0:
-                target = -qty
+                buf = (params.breakout_buffer_atr * a) if params.breakout_buffer_atr > 0 else Decimal("0")
+                up_trig = upper + buf
+                dn_trig = lower - buf
 
-            # Reverse
-            if pos > 0 and c.close < lower and trend_dir < 0:
-                target = -qty
-            elif pos < 0 and c.close > upper and trend_dir > 0:
-                target = qty
+                # Entry
+                if c.close > up_trig and trend_dir > 0:
+                    target = qty
+                elif c.close < dn_trig and trend_dir < 0:
+                    target = -qty
+
+                # Reverse
+                if pos > 0 and c.close < dn_trig and trend_dir < 0:
+                    target = -qty
+                elif pos < 0 and c.close > up_trig and trend_dir > 0:
+                    target = qty
 
         if max_position_qty is not None and max_position_qty > 0:
             if target > max_position_qty:

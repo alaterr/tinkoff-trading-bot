@@ -870,11 +870,11 @@ INDEX_HTML = """<!doctype html>
         if (sumTb) {
           sumTb.innerHTML = '';
           const tr = document.createElement('tr');
-          const pnl = (res.summary && res.summary.total_pnl) ? res.summary.total_pnl : '';
-          const mdd = (res.summary && res.summary.max_drawdown) ? res.summary.max_drawdown : '';
+          const pnl = (res.summary && res.summary.total_pnl) ? formatMoney(res.summary.total_pnl) : '';
+          const mdd = (res.summary && res.summary.max_drawdown) ? formatMoney(res.summary.max_drawdown) : '';
           const trades = (res.summary && res.summary.trades !== undefined) ? res.summary.trades : '';
           const winrate = (res.summary && res.summary.winrate !== undefined) ? (Math.round(res.summary.winrate * 10000)/100).toFixed(2) + '%' : '';
-          tr.innerHTML = `<td>${res.strategy}</td><td><code>${res.figi}</code></td><td>${res.initial_equity}</td><td>${res.final_equity}</td><td>${pnl}</td><td>${mdd}</td><td>${trades}</td><td>${winrate}</td>`;
+          tr.innerHTML = `<td>${res.strategy}</td><td><code>${res.figi}</code></td><td>${formatMoney(res.initial_equity)}</td><td>${formatMoney(res.final_equity)}</td><td>${pnl}</td><td>${mdd}</td><td>${trades}</td><td>${winrate}</td>`;
           sumTb.appendChild(tr);
         }
 
@@ -943,7 +943,7 @@ INDEX_HTML = """<!doctype html>
           return {"ema_fast":20,"ema_slow":50,"atr_period":14,"atr_stop_mult":"3","cooldown_days":5,"base_target_qty":1};
         }
         if (strategy === 'trend_breakout_atr') {
-          return {"timeframe":"1h","breakout_lookback":20,"trend_lookback":50,"atr_period":14,"atr_stop_mult":"2","atr_tp_mult":"3","risk_per_trade_pct":"0.5","exit_before_close_minutes":0};
+          return {"timeframe":"1h","breakout_lookback":20,"trend_lookback":50,"atr_period":14,"atr_stop_mult":"2","atr_tp_mult":"3","risk_per_trade_pct":"0.5","breakout_buffer_atr":"0.2","adx_period":14,"adx_min":"20","cooldown_bars_after_loss":6,"exit_before_close_minutes":0};
         }
         // donchian_atr
         return {"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1};
@@ -1572,6 +1572,10 @@ class UiServer:
                 atr_stop_mult=Decimal(str(params.get("atr_stop_mult", "2"))),
                 atr_tp_mult=Decimal(str(params.get("atr_tp_mult", "3"))),
                 risk_per_trade_pct=Decimal(str(params.get("risk_per_trade_pct", "0.5"))),
+                breakout_buffer_atr=Decimal(str(params.get("breakout_buffer_atr", "0"))),
+                adx_period=int(params.get("adx_period", 14)),
+                adx_min=Decimal(str(params.get("adx_min", "0"))),
+                cooldown_bars_after_loss=int(params.get("cooldown_bars_after_loss", 0)),
             )
             # Limits: for UI jobs use stored meta values; for config jobs fall back to instrument_config.
             inst_cfg = meta.get("instrument_config")

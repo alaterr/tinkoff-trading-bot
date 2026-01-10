@@ -11,7 +11,7 @@ from app.client import client as broker_client
 from app.instruments_config.models import GlobalExecutionConfig, GlobalRiskConfig, InstrumentConfig
 from app.settings import settings
 from app.strategies.base import BaseStrategy
-from app.strategies.positional.indicators import atr, donchian_high, donchian_low, ema
+from app.strategies.positional.indicators import adx, atr, donchian_high, donchian_low, ema
 from core.data.candles import CandleRepository
 from core.futures.rollover import should_rollover
 from core.models.entities import OrderIntent, Signal, SignalType
@@ -33,6 +33,10 @@ class TrendBreakoutATRConfig:
     atr_tp_mult: Decimal = Decimal("3")
     risk_per_trade_pct: Decimal = Decimal("0.005")  # 0.5% default
     exit_before_close_minutes: int = 0
+    breakout_buffer_atr: Decimal = Decimal("0")
+    adx_period: int = 14
+    adx_min: Decimal = Decimal("0")
+    cooldown_bars_after_loss: int = 0
 
     # Optional override for rollover decision (instrument.rollover is still the source of truth)
     days_before_expiry_to_roll: Optional[int] = None
@@ -100,6 +104,10 @@ class TrendBreakoutATRStrategy(BaseStrategy):
             atr_tp_mult=_to_decimal(p.get("atr_tp_mult")) or cfg.atr_tp_mult,
             risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct")) or cfg.risk_per_trade_pct,
             exit_before_close_minutes=int(p.get("exit_before_close_minutes", cfg.exit_before_close_minutes)),
+            breakout_buffer_atr=_to_decimal(p.get("breakout_buffer_atr")) or cfg.breakout_buffer_atr,
+            adx_period=int(p.get("adx_period", cfg.adx_period)),
+            adx_min=_to_decimal(p.get("adx_min")) or cfg.adx_min,
+            cooldown_bars_after_loss=int(p.get("cooldown_bars_after_loss", cfg.cooldown_bars_after_loss)),
             days_before_expiry_to_roll=(
                 int(p["days_before_expiry_to_roll"]) if "days_before_expiry_to_roll" in p else None
             ),
@@ -113,6 +121,7 @@ class TrendBreakoutATRStrategy(BaseStrategy):
 
         # Loop cadence: check every minute; real decision only on new closed bar.
         self.poll_seconds = 60
+        self._cooldown_until: Optional[datetime] = None
 
     def _job_id(self) -> str:
         return f"{self.figi}|{self.strategy_name}"
@@ -331,6 +340,7 @@ class TrendBreakoutATRStrategy(BaseStrategy):
                 upper = donchian_high(prev, self.cfg.breakout_lookback)
                 lower = donchian_low(prev, self.cfg.breakout_lookback)
                 a = atr(intr.candles, self.cfg.atr_period)
+                adx_v = adx(intr.candles, self.cfg.adx_period) if self.cfg.adx_min > 0 else None
 
                 current_qty = self._get_position_qty(portfolio)
                 equity = self._equity_rub(portfolio)
@@ -351,49 +361,63 @@ class TrendBreakoutATRStrategy(BaseStrategy):
                     sig = None
 
                 # Entry / reverse logic
+                # Local cooldown after loss (only blocks new entries when flat)
+                if self._cooldown_until is not None and current_qty == 0 and now_utc < self._cooldown_until:
+                    sig = None
+
                 if sig is None and upper is not None and lower is not None and trend_dir != 0:
-                    qty = self._position_size(equity=equity, atr_value=a)
-                    if last.close > upper and trend_dir > 0:
-                        sig = Signal(
-                            strategy_name=self.strategy_name,
-                            figi=self.figi,
-                            ts=last.time,
-                            signal_type=SignalType.TARGET_QTY,
-                            target_qty=qty,
-                            reason="вход: пробой верхнего дончиана + тренд вверх",
-                            atr=a,
+                    if self.cfg.adx_min > 0 and (adx_v is None or adx_v < self.cfg.adx_min):
+                        sig = None
+                    else:
+                        qty = self._position_size(equity=equity, atr_value=a)
+                        buf = (
+                            (self.cfg.breakout_buffer_atr * a)
+                            if (a is not None and self.cfg.breakout_buffer_atr > 0)
+                            else Decimal("0")
                         )
-                    elif last.close < lower and trend_dir < 0:
-                        sig = Signal(
-                            strategy_name=self.strategy_name,
-                            figi=self.figi,
-                            ts=last.time,
-                            signal_type=SignalType.TARGET_QTY,
-                            target_qty=-qty,
-                            reason="вход: пробой нижнего дончиана + тренд вниз",
-                            atr=a,
-                        )
-                    # Reverse on opposite breakout (if trend also flipped)
-                    elif current_qty > 0 and last.close < lower and trend_dir < 0:
-                        sig = Signal(
-                            strategy_name=self.strategy_name,
-                            figi=self.figi,
-                            ts=last.time,
-                            signal_type=SignalType.TARGET_QTY,
-                            target_qty=-qty,
-                            reason="переворот: пробой вниз + тренд вниз",
-                            atr=a,
-                        )
-                    elif current_qty < 0 and last.close > upper and trend_dir > 0:
-                        sig = Signal(
-                            strategy_name=self.strategy_name,
-                            figi=self.figi,
-                            ts=last.time,
-                            signal_type=SignalType.TARGET_QTY,
-                            target_qty=qty,
-                            reason="переворот: пробой вверх + тренд вверх",
-                            atr=a,
-                        )
+                        up_trig = upper + buf
+                        dn_trig = lower - buf
+                        if last.close > up_trig and trend_dir > 0:
+                            sig = Signal(
+                                strategy_name=self.strategy_name,
+                                figi=self.figi,
+                                ts=last.time,
+                                signal_type=SignalType.TARGET_QTY,
+                                target_qty=qty,
+                                reason="вход: пробой верхнего дончиана + тренд вверх",
+                                atr=a,
+                            )
+                        elif last.close < dn_trig and trend_dir < 0:
+                            sig = Signal(
+                                strategy_name=self.strategy_name,
+                                figi=self.figi,
+                                ts=last.time,
+                                signal_type=SignalType.TARGET_QTY,
+                                target_qty=-qty,
+                                reason="вход: пробой нижнего дончиана + тренд вниз",
+                                atr=a,
+                            )
+                        # Reverse on opposite breakout (if trend also flipped)
+                        elif current_qty > 0 and last.close < dn_trig and trend_dir < 0:
+                            sig = Signal(
+                                strategy_name=self.strategy_name,
+                                figi=self.figi,
+                                ts=last.time,
+                                signal_type=SignalType.TARGET_QTY,
+                                target_qty=-qty,
+                                reason="переворот: пробой вниз + тренд вниз",
+                                atr=a,
+                            )
+                        elif current_qty < 0 and last.close > up_trig and trend_dir > 0:
+                            sig = Signal(
+                                strategy_name=self.strategy_name,
+                                figi=self.figi,
+                                ts=last.time,
+                                signal_type=SignalType.TARGET_QTY,
+                                target_qty=qty,
+                                reason="переворот: пробой вверх + тренд вверх",
+                                atr=a,
+                            )
 
                 if sig is None:
                     # record transparency
@@ -478,6 +502,12 @@ class TrendBreakoutATRStrategy(BaseStrategy):
                     self.store.delete_kv(strategy_name=self.strategy_name, figi=self.figi, key="entry_price")
                     self.store.delete_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price")
                     self.store.delete_kv(strategy_name=self.strategy_name, figi=self.figi, key="tp_price")
+                    # Start cooldown only after loss exit (best-effort: assume SL implies loss)
+                    if self.cfg.cooldown_bars_after_loss > 0 and "SL" in (sig.reason or ""):
+                        hours = 1 if self.cfg.timeframe.lower().strip() == "1h" else 4
+                        self._cooldown_until = datetime.now(timezone.utc) + timedelta(
+                            hours=int(hours * self.cfg.cooldown_bars_after_loss)
+                        )
 
                 if placed.created_new:
                     self.store.add_trade_event(
