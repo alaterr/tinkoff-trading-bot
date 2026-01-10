@@ -500,6 +500,10 @@ INDEX_HTML = """<!doctype html>
               <tbody></tbody>
             </table>
           </div>
+          <div class="muted" style="margin-top:0.75rem;">График цены и точки сделок</div>
+          <div class="table-container" style="margin-top:0.5rem; padding: 0.75rem;">
+            <canvas id="btPriceChart" height="260" style="width:100%; display:block;"></canvas>
+          </div>
         </div>
       </div>
 
@@ -894,6 +898,143 @@ INDEX_HTML = """<!doctype html>
           },
           commission: v => v ? formatMoney(v) : '',
         });
+
+        // Price chart + trades overlay
+        try {
+          drawBacktestPriceChart(res.price_series || [], res.trades || []);
+        } catch (e) {
+          console.warn('Chart draw failed', e);
+        }
+      }
+
+      function drawBacktestPriceChart(priceSeries, trades) {
+        const canvas = document.getElementById('btPriceChart');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        // HiDPI
+        const cssW = canvas.clientWidth || 800;
+        const cssH = canvas.clientHeight || 260;
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(cssW * dpr);
+        canvas.height = Math.floor(cssH * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const w = cssW, h = cssH;
+        ctx.clearRect(0, 0, w, h);
+
+        if (!priceSeries || priceSeries.length < 2) {
+          ctx.fillStyle = 'rgba(148, 163, 184, 0.9)';
+          ctx.font = '14px system-ui';
+          ctx.fillText('Нет данных для графика', 12, 20);
+          return;
+        }
+
+        const padL = 46, padR = 10, padT = 10, padB = 28;
+        const iw = w - padL - padR;
+        const ih = h - padT - padB;
+
+        // Parse
+        const xs = [];
+        const ys = [];
+        for (const p of priceSeries) {
+          const t = (p.ts || p.time || p.datetime || '').toString();
+          const y = parseFloat(p.close);
+          if (!t || !isFinite(y)) continue;
+          xs.push(t);
+          ys.push(y);
+        }
+        if (ys.length < 2) return;
+        let ymin = Math.min(...ys);
+        let ymax = Math.max(...ys);
+        if (ymax === ymin) { ymax += 1; ymin -= 1; }
+        const ypad = (ymax - ymin) * 0.04;
+        ymax += ypad; ymin -= ypad;
+
+        const xAt = (i) => padL + (i / (ys.length - 1)) * iw;
+        const yAt = (y) => padT + (1 - (y - ymin) / (ymax - ymin)) * ih;
+
+        // Grid
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.10)';
+        ctx.lineWidth = 1;
+        for (let k = 0; k <= 4; k++) {
+          const yy = padT + (k / 4) * ih;
+          ctx.beginPath();
+          ctx.moveTo(padL, yy);
+          ctx.lineTo(padL + iw, yy);
+          ctx.stroke();
+        }
+
+        // Y axis labels
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.9)';
+        ctx.font = '12px system-ui';
+        for (let k = 0; k <= 4; k++) {
+          const yv = ymin + (1 - k / 4) * (ymax - ymin);
+          const yy = padT + (k / 4) * ih;
+          ctx.fillText(yv.toFixed(0), 8, yy + 4);
+        }
+
+        // Price line
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.95)'; // cyan
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(xAt(0), yAt(ys[0]));
+        for (let i = 1; i < ys.length; i++) {
+          ctx.lineTo(xAt(i), yAt(ys[i]));
+        }
+        ctx.stroke();
+
+        // Map trades by ts to index
+        const indexByTs = new Map();
+        for (let i = 0; i < xs.length; i++) indexByTs.set(xs[i], i);
+
+        function drawMarker(i, y, side) {
+          const x = xAt(i);
+          const yy = yAt(y);
+          const size = 6;
+          if (side === 'buy') {
+            ctx.fillStyle = 'rgba(34, 197, 94, 0.95)';
+            ctx.beginPath();
+            ctx.moveTo(x, yy - size);
+            ctx.lineTo(x - size, yy + size);
+            ctx.lineTo(x + size, yy + size);
+            ctx.closePath();
+            ctx.fill();
+          } else {
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.95)';
+            ctx.beginPath();
+            ctx.moveTo(x, yy + size);
+            ctx.lineTo(x - size, yy - size);
+            ctx.lineTo(x + size, yy - size);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+
+        for (const t of trades || []) {
+          const ts = (t.ts || '').toString();
+          const side = (t.side || '').toString().toLowerCase().includes('buy') ? 'buy' : 'sell';
+          let idx = indexByTs.get(ts);
+          if (idx === undefined) {
+            // best-effort: try to match by minute string
+            const key = ts.replace('Z','').slice(0,16);
+            for (let i = 0; i < xs.length; i++) {
+              const k = xs[i].replace('Z','').slice(0,16);
+              if (k === key) { idx = i; break; }
+            }
+          }
+          if (idx === undefined) continue;
+          drawMarker(idx, ys[idx], side);
+        }
+
+        // X labels (start/end)
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.9)';
+        ctx.font = '12px system-ui';
+        ctx.fillText(formatDate(xs[0]), padL, h - 10);
+        const endTxt = formatDate(xs[xs.length - 1]);
+        const tw = ctx.measureText(endTxt).width;
+        ctx.fillText(endTxt, padL + iw - tw, h - 10);
       }
 
       async function pause() {
@@ -1490,6 +1631,7 @@ class UiServer:
                     "days": days,
                     "initial_equity": str(bt_cfg.initial_equity),
                     "final_equity": str(res.equity[-1].equity if res.equity else bt_cfg.initial_equity),
+                    "price_series": [{"ts": c.time.isoformat(), "close": str(c.close)} for c in candles[-1500:]],
                     "instrument_spec": {
                         "price_multiplier": str(f_spec.price_multiplier),
                         "currency": f_spec.currency,
@@ -1599,6 +1741,7 @@ class UiServer:
                     "days": days,
                     "initial_equity": str(bt_cfg.initial_equity),
                     "final_equity": str(equity[-1].equity if equity else bt_cfg.initial_equity),
+                    "price_series": [{"ts": c.time.isoformat(), "close": str(c.close)} for c in candles_tf[-2000:]],
                     "instrument_spec": {
                         "price_multiplier": str(f_spec.price_multiplier),
                         "currency": f_spec.currency,
