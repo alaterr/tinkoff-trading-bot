@@ -1573,9 +1573,10 @@ class UiServer:
                 atr_tp_mult=Decimal(str(params.get("atr_tp_mult", "3"))),
                 risk_per_trade_pct=Decimal(str(params.get("risk_per_trade_pct", "0.5"))),
             )
+            # Limits: for UI jobs use stored meta values; for config jobs fall back to instrument_config.
             inst_cfg = meta.get("instrument_config")
-            max_pos = int(getattr(inst_cfg, "max_position_qty", None) or 10)
-            max_order = int(getattr(inst_cfg, "max_order_qty", None) or max_pos)
+            max_pos = int(meta.get("max_position_qty") or getattr(inst_cfg, "max_position_qty", None) or 10)
+            max_order = int(meta.get("max_order_qty") or getattr(inst_cfg, "max_order_qty", None) or max_pos)
             trades, equity = run_backtest_trend_breakout_atr(
                 figi=figi,
                 candles_tf=candles_tf,
