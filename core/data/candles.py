@@ -97,6 +97,89 @@ class CandleRepository:
         out = normalized[-n:]
         return D1FetchResult(candles=out, last_closed_ts=out[-1].time)
 
+    async def fetch_range(
+        self,
+        *,
+        figi: str,
+        from_ts: datetime,
+        to_ts: datetime,
+        interval: CandleInterval,
+    ) -> List[Candle]:
+        """
+        Fetch candles in [from_ts, to_ts] and normalize to core Candle.
+        Returns only candles with time <= to_ts - 5s (closed).
+        """
+        if from_ts.tzinfo is None:
+            from_ts = from_ts.replace(tzinfo=timezone.utc)
+        if to_ts.tzinfo is None:
+            to_ts = to_ts.replace(tzinfo=timezone.utc)
+        raw: List[HistoricCandle] = []
+        async for hc in self._broker.get_all_candles(
+            figi=figi,
+            from_=from_ts,
+            to=to_ts,
+            interval=interval,
+        ):
+            raw.append(hc)
+        out: List[Candle] = []
+        for hc in raw:
+            c = _hc_to_candle(figi, hc)
+            if c.time <= (to_ts - timedelta(seconds=5)):
+                out.append(c)
+        out.sort(key=lambda c: c.time)
+        return out
+
+    async def fetch_intraday_range(
+        self,
+        *,
+        figi: str,
+        from_ts: datetime,
+        to_ts: datetime,
+        timeframe: str,
+    ) -> List[Candle]:
+        """
+        Fetch intraday candles for timeframe:
+        - 1h: direct
+        - 4h: aggregate from 1h
+        """
+        tf = timeframe.lower().strip()
+        if tf not in {"1h", "4h"}:
+            raise ValueError("timeframe must be '1h' or '4h'")
+        h1 = await self.fetch_range(
+            figi=figi,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            interval=CandleInterval.CANDLE_INTERVAL_HOUR,
+        )
+        if tf == "1h":
+            return h1
+
+        # Aggregate to 4h buckets
+        buckets: dict[datetime, list[Candle]] = {}
+        for c in h1:
+            t = c.time.astimezone(timezone.utc)
+            bucket_start = t.replace(minute=0, second=0, microsecond=0)
+            bucket_start = bucket_start.replace(hour=(bucket_start.hour // 4) * 4)
+            buckets.setdefault(bucket_start, []).append(c)
+        agg: List[Candle] = []
+        for bucket_start in sorted(buckets.keys()):
+            cs = buckets[bucket_start]
+            if len(cs) < 4:
+                continue
+            cs.sort(key=lambda x: x.time)
+            agg.append(
+                Candle(
+                    figi=figi,
+                    time=cs[-1].time,
+                    open=cs[0].open,
+                    high=max(x.high for x in cs),
+                    low=min(x.low for x in cs),
+                    close=cs[-1].close,
+                    volume=sum(int(x.volume) for x in cs),
+                )
+            )
+        return agg
+
     async def fetch_last_intraday(
         self,
         *,

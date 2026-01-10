@@ -455,6 +455,45 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
+          <h3>🧪 Dry‑run (бэктест на 90 дней)</h3>
+          <div class="muted">Прогон стратегии на исторических данных без реальной торговли. Требуется токен для загрузки свечей.</div>
+          <div class="row" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem;">
+            <div>
+              <div class="muted">Джоба</div>
+              <select id="btJobSelect" style="width:100%; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary);">
+                <option value="">— выберите джобу —</option>
+              </select>
+            </div>
+            <div>
+              <div class="muted">Стартовый капитал (RUB)</div>
+              <input id="btEquity" placeholder="например 1000000" value="1000000" />
+            </div>
+            <div>
+              <div class="muted">Горизонт (дней)</div>
+              <input id="btDays" placeholder="90" value="90" />
+            </div>
+            <div style="display:flex; align-items:end;">
+              <button class="success" onclick="runBacktest()">▶ Запустить dry‑run</button>
+            </div>
+          </div>
+          <div class="muted" id="btStatus" style="margin-top:0.75rem;">—</div>
+          <div class="table-container" style="margin-top:0.75rem;">
+            <table id="btSummaryTbl">
+              <thead><tr><th>Стратегия</th><th>FIGI</th><th>Капитал старт</th><th>Капитал финал</th><th>PnL</th><th>Max DD</th><th>Сделок</th><th>Winrate</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="table-container" style="margin-top:0.75rem;">
+            <table id="btTradesTbl">
+              <thead><tr><th>Время</th><th>Сторона</th><th>Кол-во</th><th>Цена</th><th>Комиссия</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="card fade-in" style="grid-column: 1 / -1;">
           <h3>📈 Стратегии</h3>
           <div class="muted">Сконфигурированные стратегии и время последней обработки</div>
           <div class="table-container">
@@ -670,6 +709,20 @@ INDEX_HTML = """<!doctype html>
             }
           }
 
+          // Backtest job selector
+          const btSel = document.getElementById('btJobSelect');
+          if (btSel) {
+            const cur = btSel.value;
+            btSel.innerHTML = '<option value=\"\">— выберите джобу —</option>';
+            for (const j of (jobs.items || [])) {
+              const opt = document.createElement('option');
+              opt.value = j.job_id;
+              opt.textContent = `${j.strategy} • ${j.figi}`;
+              btSel.appendChild(opt);
+            }
+            if (cur) btSel.value = cur;
+          }
+
           // Strategies
           const strategies = await jget('/api/strategies');
           fillTable('strategiesTbl', strategies.items, ['figi', 'strategy', 'instrument_type', 'last_processed'], {
@@ -754,6 +807,44 @@ INDEX_HTML = """<!doctype html>
         } catch (err) {
           console.error('Refresh error:', err);
         }
+      }
+
+      async function runBacktest() {
+        const job_id = (document.getElementById('btJobSelect').value || '').trim();
+        const initial_equity = (document.getElementById('btEquity').value || '').trim();
+        const days = parseInt((document.getElementById('btDays').value || '90').trim(), 10);
+        if (!job_id) { alert('Выберите джобу'); return; }
+        if (!initial_equity) { alert('Введите стартовый капитал'); return; }
+        const st = document.getElementById('btStatus');
+        if (st) st.textContent = '⏳ Выполняю dry‑run...';
+        const res = await jpost('/api/backtest/run', { job_id, initial_equity, days });
+        if (!res || res.ok === false) {
+          if (st) st.textContent = 'Ошибка: ' + (res.error || 'неизвестно');
+          alert(res.error || 'Не удалось выполнить dry‑run');
+          return;
+        }
+        if (st) st.textContent = '✅ Готово';
+
+        // Summary table
+        const sumTb = document.querySelector('#btSummaryTbl tbody');
+        if (sumTb) {
+          sumTb.innerHTML = '';
+          const tr = document.createElement('tr');
+          const pnl = (res.summary && res.summary.total_pnl) ? res.summary.total_pnl : '';
+          const mdd = (res.summary && res.summary.max_drawdown) ? res.summary.max_drawdown : '';
+          const trades = (res.summary && res.summary.trades !== undefined) ? res.summary.trades : '';
+          const winrate = (res.summary && res.summary.winrate !== undefined) ? (Math.round(res.summary.winrate * 10000)/100).toFixed(2) + '%' : '';
+          tr.innerHTML = `<td>${res.strategy}</td><td><code>${res.figi}</code></td><td>${res.initial_equity}</td><td>${res.final_equity}</td><td>${pnl}</td><td>${mdd}</td><td>${trades}</td><td>${winrate}</td>`;
+          sumTb.appendChild(tr);
+        }
+
+        // Trades
+        fillTable('btTradesTbl', res.trades || [], ['ts','side','qty','price','commission'], {
+          ts: formatDate,
+          side: v => (String(v).toLowerCase().includes('buy') ? badge('BUY','success') : badge('SELL','danger')),
+          price: v => v ? formatMoney(v) : '',
+          commission: v => v ? formatMoney(v) : '',
+        });
       }
 
       async function pause() {
@@ -1160,6 +1251,138 @@ class UiServer:
         except Exception as e:  # noqa: BLE001
             logger.exception("futures search failed")
             return _json_response({"error": str(e)}, status=500)
+
+    async def handle_backtest_run(self, request: web.Request) -> web.Response:
+        """
+        Dry-run (backtest) on historical data, no real trading.
+        body: { job_id, initial_equity, days (default 90) }
+        """
+        body = await request.json()
+        jid = str(body.get("job_id") or "")
+        days = int(body.get("days") or 90)
+        initial_equity = str(body.get("initial_equity") or "1000000")
+        if not jid:
+            return _json_response({"ok": False, "error": "job_id обязателен"}, status=400)
+        if days <= 0 or days > 365:
+            return _json_response({"ok": False, "error": "days должно быть в диапазоне 1..365"}, status=400)
+        if not broker_client.credentials_set():
+            return _json_response({"ok": False, "error": "Сначала установите токен"}, status=400)
+        if jid not in self._job_defs:
+            return _json_response({"ok": False, "error": "Неизвестная джоба"}, status=404)
+
+        meta = self._job_defs[jid]
+        figi = meta["figi"]
+        strat: StrategyName = meta["strategy"]
+        params = dict(meta.get("params") or {})
+
+        from datetime import timedelta
+        from decimal import Decimal
+
+        from core.backtest.engine import BacktestConfig, run_backtest_target_qty
+        from core.backtest.trend_breakout_atr import TrendBreakoutParams, run_backtest_trend_breakout_atr
+        from core.data.candles import CandleRepository
+        from reports.stats import summarize
+        from t_tech.invest import CandleInterval
+
+        # Ensure broker client is initialized (mode does not matter for history)
+        await broker_client.ainit()
+        repo = CandleRepository(broker=broker_client)
+
+        to_ts = datetime.now(timezone.utc)
+        from_ts = to_ts - timedelta(days=days + 30)  # padding for indicators
+
+        bt_cfg = BacktestConfig(
+            initial_equity=Decimal(initial_equity),
+            price_slippage_bps=Decimal(str(instruments_config.global_execution.price_slippage_bps)),
+            commission_bps=Decimal(str(instruments_config.global_execution.commission_bps)),
+        )
+
+        if strat.value in {"donchian_atr", "ema_atr"}:
+            # D1 candles only
+            candles = await repo.fetch_range(figi=figi, from_ts=from_ts, to_ts=to_ts, interval=CandleInterval.CANDLE_INTERVAL_DAY)
+            # keep last `days` days (closed)
+            cutoff = to_ts - timedelta(days=days)
+            candles = [c for c in candles if c.time >= cutoff]
+            if not candles:
+                return _json_response({"ok": False, "error": "Не удалось загрузить свечи"}, status=500)
+
+            if strat.value == "donchian_atr":
+                from app.strategies.positional.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
+
+                st = DonchianATRStrategy(figi=figi, config=DonchianAtrConfig(**params))
+                sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, strategy_name=strat.value)
+            else:
+                from app.strategies.positional.ema_atr import EmaAtrTrendStrategy, EmaAtrConfig
+
+                st = EmaAtrTrendStrategy(figi=figi, config=EmaAtrConfig(**params))
+                sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, in_cooldown=False, strategy_name=strat.value)
+
+            res = run_backtest_target_qty(figi=figi, strategy_name=strat.value, candles=candles, signal_fn=sig_fn, cfg=bt_cfg)
+            summ = summarize(res.trades, res.equity)
+            return _json_response(
+                {
+                    "ok": True,
+                    "strategy": strat.value,
+                    "figi": figi,
+                    "days": days,
+                    "initial_equity": str(bt_cfg.initial_equity),
+                    "final_equity": str(res.equity[-1].equity if res.equity else bt_cfg.initial_equity),
+                    "summary": {
+                        "trades": summ.trades,
+                        "winrate": summ.winrate,
+                        "total_pnl": str(summ.total_pnl),
+                        "max_drawdown": str(summ.max_drawdown),
+                    },
+                    "trades": [t.__dict__ for t in res.trades[-200:]],
+                    "equity": [p.__dict__ for p in res.equity[-500:]],
+                }
+            )
+
+        if strat.value == "trend_breakout_atr":
+            tf = str(params.get("timeframe") or "1h")
+            # Intraday + D1
+            candles_tf = await repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf)
+            cutoff = to_ts - timedelta(days=days)
+            candles_tf = [c for c in candles_tf if c.time >= cutoff]
+
+            d1_from = to_ts - timedelta(days=days + int(params.get("trend_lookback", 50)) + 60)
+            candles_d1 = await repo.fetch_range(figi=figi, from_ts=d1_from, to_ts=to_ts, interval=CandleInterval.CANDLE_INTERVAL_DAY)
+            if not candles_tf or not candles_d1:
+                return _json_response({"ok": False, "error": "Не удалось загрузить свечи"}, status=500)
+
+            p = TrendBreakoutParams(
+                timeframe=tf,
+                breakout_lookback=int(params.get("breakout_lookback", 20)),
+                trend_lookback=int(params.get("trend_lookback", 50)),
+                atr_period=int(params.get("atr_period", 14)),
+                atr_stop_mult=Decimal(str(params.get("atr_stop_mult", "2"))),
+                atr_tp_mult=Decimal(str(params.get("atr_tp_mult", "3"))),
+                risk_per_trade_pct=Decimal(str(params.get("risk_per_trade_pct", "0.5"))),
+            )
+            trades, equity = run_backtest_trend_breakout_atr(
+                figi=figi, candles_tf=candles_tf, candles_d1=candles_d1, params=p, cfg=bt_cfg
+            )
+            summ = summarize(trades, equity)
+            return _json_response(
+                {
+                    "ok": True,
+                    "strategy": strat.value,
+                    "figi": figi,
+                    "days": days,
+                    "initial_equity": str(bt_cfg.initial_equity),
+                    "final_equity": str(equity[-1].equity if equity else bt_cfg.initial_equity),
+                    "summary": {
+                        "trades": summ.trades,
+                        "winrate": summ.winrate,
+                        "total_pnl": str(summ.total_pnl),
+                        "max_drawdown": str(summ.max_drawdown),
+                    },
+                    "trades": [t.__dict__ for t in trades[-200:]],
+                    "equity": [p.__dict__ for p in equity[-2000:]],
+                }
+            )
+
+        return _json_response({"ok": False, "error": "Стратегия не поддерживает dry-run"}, status=400)
 
     async def handle_job_decisions(self, request: web.Request) -> web.Response:
         """
@@ -1637,6 +1860,7 @@ async def start_ui_server(*, store: StateStore, host: str, port: int) -> web.App
     app.router.add_post("/api/jobs/stop", srv.handle_job_stop)
     app.router.add_get("/api/jobs/decisions", srv.handle_job_decisions)
     app.router.add_get("/api/broker/futures/search", srv.handle_futures_search)
+    app.router.add_post("/api/backtest/run", srv.handle_backtest_run)
     app.router.add_get("/api/strategies", srv.handle_strategies)
     app.router.add_get("/api/positions", srv.handle_positions)
     app.router.add_get("/api/orders", srv.handle_orders)
