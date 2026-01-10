@@ -14,6 +14,12 @@ logging.getLogger("tinkoff").setLevel(settings.tinkoff_library_log_level)
 
 
 async def run():
+    # Safety guard: never allow accidental real trading.
+    if not settings.sandbox and not settings.i_know_what_i_am_doing:
+        raise SystemExit(
+            "Refusing to start with SANDBOX=false without explicit confirmation. "
+            "Set I_KNOW_WHAT_I_AM_DOING=true to acknowledge real trading mode."
+        )
     await client.ainit()
     spawned_tasks = []
     for instrument_config in instruments_config.instruments:

@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - target:
+      kind: Deployment
+      name: tinkoff-bot
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: ghcr.io/YOUR_ORG/tinkoff-trading-bot:latest
+  - target:
+      kind: ConfigMap
+      name: tinkoff-bot-config
+    patch: |-
+      - op: replace
+        path: /data/SANDBOX
+        value: "false"
+      - op: replace
+        path: /data/I_KNOW_WHAT_I_AM_DOING
+        value: "true"
+

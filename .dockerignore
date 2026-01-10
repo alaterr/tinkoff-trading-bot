@@ -1,0 +1,17 @@
+.git
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv
+.venv
+env
+.env
+stats.db
+state.db
+market_data_cache
+dist
+build
+

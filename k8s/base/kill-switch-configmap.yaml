@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tinkoff-bot-kill-switch
+  namespace: tinkoff-bot
+data:
+  # If this key exists, file will be mounted and RiskGate will block trading.
+  kill.switch: "1"
+

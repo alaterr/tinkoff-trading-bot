@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tinkoff-bot
+  namespace: tinkoff-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tinkoff-bot
+  template:
+    metadata:
+      labels:
+        app: tinkoff-bot
+    spec:
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: bot
+          image: ghcr.io/YOUR_ORG/tinkoff-trading-bot:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: tinkoff-bot-config
+            - secretRef:
+                name: tinkoff-bot-secrets
+          env:
+            # Ensure config is read from /data (mounted PVC + configmap file)
+            - name: PYTHONPATH
+              value: "/app"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: instruments-config
+              mountPath: /data/instruments_config.json
+              subPath: instruments_config.json
+              readOnly: true
+            # Optional kill-switch (create/delete configmap to toggle)
+            - name: kill-switch
+              mountPath: /etc/kill-switch
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tinkoff-bot-data
+        - name: instruments-config
+          configMap:
+            name: tinkoff-bot-config
+            items:
+              - key: instruments_config.json
+                path: instruments_config.json
+        - name: kill-switch
+          configMap:
+            name: tinkoff-bot-kill-switch
+            optional: true
+

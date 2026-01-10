@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     token: str
     account_id: Optional[str] = None
     sandbox: bool = True
+    # Safety latch: real trading mode requires explicit confirmation flag.
+    # This must remain False by default.
+    i_know_what_i_am_doing: bool = False
     log_level = logging.DEBUG
     tinkoff_library_log_level = logging.INFO
     use_candle_history_cache = True

@@ -27,11 +27,16 @@ To run the bot, you need to have a Tinkoff account.
   make start
   ```
 
+## Kubernetes (k8s)
+
+Manifests + Dockerfile are included. See `k8s/README.md`.
+
 ## .env file content
 - `TOKEN`: Your Tinkoff token. You can generate it in [the settings](https://www.tinkoff.ru/invest/settings/)
 Can be a token for sandbox or for real account.
 - `ACCOUNT_ID`: Your Tinkoff account id. You can get it using [get accounts tool](#get-accounts-tool). If not specified, the first account  used.
 - `SANDBOX`: Set to `false` if you want to use real account. Default is `true`.
+  - Safety latch: if `SANDBOX=false`, you **must** also set `I_KNOW_WHAT_I_AM_DOING=true` or the bot will refuse to start.
 
 ## instruments_config.json file content
 #### instruments

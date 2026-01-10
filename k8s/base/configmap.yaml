@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tinkoff-bot-config
+  namespace: tinkoff-bot
+data:
+  # Default: sandbox mode ON (safe).
+  SANDBOX: "true"
+  I_KNOW_WHAT_I_AM_DOING: "false"
+
+  # Bot configuration file (mounted into /data/instruments_config.json)
+  instruments_config.json: |
+    {
+      "global_risk": {
+        "max_positions_total": 10,
+        "max_daily_loss_rub": 0,
+        "max_weekly_loss_rub": 0,
+        "max_trades_per_day": 10,
+        "max_trades_per_week": 50,
+        "risk_per_trade_pct": 0.01,
+        "cooldown_seconds_after_error": 60,
+        "kill_switch_file": "/etc/kill-switch/kill.switch"
+      },
+      "global_execution": {
+        "order_type": "market",
+        "trade_on_close": true,
+        "trade_only_market_hours": true,
+        "timezone": "Europe/Moscow",
+        "price_slippage_bps": 0
+      },
+      "instruments": [
+        {
+          "figi": "REPLACE_WITH_FUTURES_FIGI",
+          "instrument_type": "futures",
+          "allow_short": true,
+          "allow_margin": false,
+          "max_position_qty": 10,
+          "max_order_qty": 5,
+          "rollover": {
+            "enabled": true,
+            "days_before_expiry_to_roll": 5,
+            "roll_mode": "close_and_open",
+            "next_contract_figi": "REPLACE_WITH_NEXT_FUTURES_FIGI"
+          },
+          "strategy": {
+            "name": "donchian_atr",
+            "parameters": {
+              "breakout_lookback": 20,
+              "exit_lookback": 10,
+              "atr_period": 14,
+              "atr_stop_mult": "3",
+              "base_target_qty": 1
+            }
+          }
+        }
+      ]
+    }
+
