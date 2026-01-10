@@ -10,6 +10,7 @@ from t_tech.invest import (
     GetAccountsResponse,
     Account,
     Client,
+    AsyncClient,
     GetOrdersResponse,
     GetLastPricesResponse,
     LastPrice,
@@ -21,10 +22,19 @@ from t_tech.invest import (
     PostOrderResponse,
     InstrumentResponse,
     Instrument,
-    MarketDataCache,
 )
 from t_tech.invest.caching.market_data_cache.cache_settings import MarketDataCacheSettings
 from t_tech.invest.services import Services
+
+# Try to import MarketDataCache - it may not be available in all versions
+try:
+    from t_tech.invest.caching.market_data_cache.market_data_cache import MarketDataCache
+except ImportError:
+    try:
+        from t_tech.invest.caching import MarketDataCache
+    except ImportError:
+        # MarketDataCache not available - disable caching feature
+        MarketDataCache = None  # type: ignore
 from t_tech.invest.utils import now
 
 from app.client import TinkoffClient
@@ -104,18 +114,32 @@ class CandleHandler:
     async def get_all_candles(self, **kwargs):
         if not self.candles:
             with Client(settings.token) as client:
-                market_data_cache = MarketDataCache(
-                    settings=MarketDataCacheSettings(base_cache_dir=Path("market_data_cache")),
-                    services=client,
-                )
-                self.candles = list(
-                    market_data_cache.get_all_candles(
-                        figi=kwargs["figi"],
-                        to=self.now,
-                        from_=self.from_date,
-                        interval=kwargs["interval"],
+                if MarketDataCache is not None:
+                    market_data_cache = MarketDataCache(
+                        settings=MarketDataCacheSettings(base_cache_dir=Path("market_data_cache")),
+                        services=client,
                     )
-                )
+                    self.candles = list(
+                        market_data_cache.get_all_candles(
+                            figi=kwargs["figi"],
+                            to=self.now,
+                            from_=self.from_date,
+                            interval=kwargs["interval"],
+                        )
+                    )
+                else:
+                    # Fallback: use async client directly if cache not available
+                    async_client = await AsyncClient(token=settings.token, app_name=settings.app_name).__aenter__()
+                    try:
+                        async for candle in async_client.get_all_candles(
+                            figi=kwargs["figi"],
+                            to=self.now,
+                            from_=self.from_date,
+                            interval=kwargs["interval"],
+                        ):
+                            self.candles.append(candle)
+                    finally:
+                        await async_client.__aexit__(None, None, None)
 
         any_returned = False
         for candle in self.candles:

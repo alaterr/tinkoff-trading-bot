@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from t_tech.invest import (
     AsyncClient,
@@ -9,11 +9,23 @@ from t_tech.invest import (
     OrderState,
     GetTradingStatusResponse,
     InstrumentResponse,
-    MarketDataCache,
 )
 from t_tech.invest.async_services import AsyncServices, MarketDataService
 from t_tech.invest.caching.market_data_cache.cache_settings import MarketDataCacheSettings
 from t_tech.invest.services import Services
+
+# Try to import MarketDataCache - it may not be available in all versions
+if TYPE_CHECKING:
+    from t_tech.invest.caching.market_data_cache.market_data_cache import MarketDataCache
+else:
+    try:
+        from t_tech.invest.caching.market_data_cache.market_data_cache import MarketDataCache
+    except ImportError:
+        try:
+            from t_tech.invest.caching import MarketDataCache
+        except ImportError:
+            # MarketDataCache not available - disable caching feature
+            MarketDataCache = None  # type: ignore
 
 from app.settings import settings
 
@@ -33,7 +45,7 @@ class TinkoffClient:
 
     async def ainit(self):
         self.client = await AsyncClient(token=self.token, app_name=settings.app_name).__aenter__()
-        if settings.use_candle_history_cache:
+        if settings.use_candle_history_cache and MarketDataCache is not None:
             self.sync_client = Client(token=self.token, app_name=settings.app_name).__enter__()
             self.market_data_cache = MarketDataCache(
                 settings=MarketDataCacheSettings(base_cache_dir=Path("market_data_cache")),
@@ -74,7 +86,7 @@ class TinkoffClient:
         return await self.client.users.get_accounts()
 
     async def get_all_candles(self, **kwargs):
-        if settings.use_candle_history_cache:
+        if settings.use_candle_history_cache and self.market_data_cache is not None:
             for candle in self.market_data_cache.get_all_candles(**kwargs):
                 yield candle
         else:
