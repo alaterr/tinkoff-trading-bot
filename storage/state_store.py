@@ -153,6 +153,20 @@ class StateStore:
             )
             """
         )
+
+        # UI-managed jobs (persisted)
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ui_jobs (
+                job_id TEXT PRIMARY KEY,
+                figi TEXT NOT NULL,
+                strategy_name TEXT NOT NULL,
+                strategy_params_json TEXT NOT NULL DEFAULT '{}',
+                instrument_type TEXT NOT NULL DEFAULT 'futures',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
 
     def set_job_decision(self, *, job_id: str, payload: dict[str, Any], ts: Optional[datetime] = None) -> None:
@@ -184,6 +198,68 @@ class StateStore:
             except Exception:
                 payload = {"raw": payload_json}
             out.append({"job_id": job_id, "updated_at": updated_at, "payload": payload})
+        return out
+
+    def upsert_ui_job(
+        self,
+        *,
+        job_id: str,
+        figi: str,
+        strategy_name: str,
+        strategy_params: dict[str, Any],
+        instrument_type: str = "futures",
+        created_at: Optional[datetime] = None,
+    ) -> None:
+        assert self._conn is not None
+        if created_at is None:
+            created_at = datetime.now(timezone.utc)
+        self._conn.execute(
+            """
+            INSERT INTO ui_jobs(job_id, figi, strategy_name, strategy_params_json, instrument_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                figi=excluded.figi,
+                strategy_name=excluded.strategy_name,
+                strategy_params_json=excluded.strategy_params_json,
+                instrument_type=excluded.instrument_type
+            """,
+            (
+                job_id,
+                figi,
+                strategy_name,
+                json.dumps(strategy_params or {}, ensure_ascii=False, sort_keys=True),
+                instrument_type,
+                _dt_to_str(created_at),
+            ),
+        )
+        self._conn.commit()
+
+    def delete_ui_job(self, *, job_id: str) -> None:
+        assert self._conn is not None
+        self._conn.execute("DELETE FROM ui_jobs WHERE job_id=?", (job_id,))
+        self._conn.commit()
+
+    def list_ui_jobs(self) -> list[dict[str, Any]]:
+        assert self._conn is not None
+        rows = self._conn.execute(
+            "SELECT job_id, figi, strategy_name, strategy_params_json, instrument_type, created_at FROM ui_jobs ORDER BY created_at DESC"
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for job_id, figi, strategy_name, params_json, instrument_type, created_at in rows:
+            try:
+                params = json.loads(params_json or "{}")
+            except Exception:
+                params = {}
+            out.append(
+                {
+                    "job_id": str(job_id),
+                    "figi": str(figi),
+                    "strategy": str(strategy_name),
+                    "strategy_params": params,
+                    "instrument_type": str(instrument_type),
+                    "created_at": str(created_at),
+                }
+            )
         return out
 
     def list_open_orders(self) -> list[str]:

@@ -345,6 +345,34 @@ INDEX_HTML = """<!doctype html>
           </div>
         </div>
         <div class="card fade-in">
+          <h3>➕ Создать джобу</h3>
+          <div class="muted">Поиск фьючерса → выбор стратегии → сохранить джобу (появится в списке выше)</div>
+          <input id="futQuery" placeholder="Поиск фьючерса: тикер или название (например, Si, BR, Gazp)" />
+          <div class="btn-group">
+            <button onclick="searchFutures()">🔎 Найти</button>
+          </div>
+          <div class="muted" style="margin-top:0.5rem;">Результаты:</div>
+          <select id="futSelect" style="width:100%; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary);">
+            <option value="">— выберите фьючерс —</option>
+          </select>
+          <input id="figiInput" placeholder="FIGI (можно вставить вручную)" />
+          <div class="muted" style="margin-top:0.5rem;">Стратегия:</div>
+          <select id="strategySelect" style="width:100%; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary);">
+            <option value="donchian_atr">donchian_atr</option>
+            <option value="ema_atr">ema_atr</option>
+          </select>
+          <div class="muted" style="margin-top:0.75rem;">Описание стратегии:</div>
+          <div id="strategyDesc" class="muted" style="white-space: pre-wrap; line-height: 1.45; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem;">
+            —
+          </div>
+          <div class="muted" style="margin-top:0.5rem;">Параметры (JSON):</div>
+          <textarea id="paramsInput" style="width:100%; min-height:120px; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-family: 'Monaco','Menlo',monospace; font-size: 0.85rem;">{"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1}</textarea>
+          <div class="btn-group">
+            <button class="success" onclick="createJob()">💾 Сохранить джобу</button>
+          </div>
+          <div class="muted">После сохранения джоба появится в «Торговые джобы». Запуск — кнопкой «Старт».</div>
+        </div>
+        <div class="card fade-in">
           <h3>⚙️ Управление</h3>
           <div class="status-grid">
             <div class="status-item">
@@ -769,6 +797,117 @@ INDEX_HTML = """<!doctype html>
         }
       }
 
+      function defaultParams(strategy) {
+        if (strategy === 'ema_atr') {
+          return {"ema_fast":20,"ema_slow":50,"atr_period":14,"atr_stop_mult":"3","cooldown_days":5,"base_target_qty":1};
+        }
+        // donchian_atr
+        return {"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1};
+      }
+
+      function strategyDescription(strategy) {
+        if (strategy === 'ema_atr') {
+          return [
+            'EMA + ATR (D1, позиционная)',
+            '',
+            'Идея: торговать по тренду на дневках.',
+            'Сигнал формируется по закрытию дня.',
+            '',
+            'Лонг-режим:',
+            '- Close > EMA(slow) и EMA(fast) > EMA(slow) → цель: держать/встать в лонг (target_qty = +base_target_qty)',
+            '',
+            'Шорт-режим:',
+            '- Close < EMA(slow) и EMA(fast) < EMA(slow) → цель: держать/встать в шорт (target_qty = -base_target_qty)',
+            '',
+            'Выход:',
+            '- Если bias пропал/сменился → цель: выйти в 0 (target_qty = 0)',
+            '',
+            'ATR:',
+            '- ATR считается для оценки волатильности и передаётся в RiskGate (может масштабировать размер).',
+            '',
+            'Параметры:',
+            '- ema_fast / ema_slow: периоды EMA',
+            '- atr_period: период ATR',
+            '- atr_stop_mult: множитель ATR (для стоп-логики/сайзинга; стоп может быть реализован на уровне раннера)',
+            '- cooldown_days: пауза после выхода (для уменьшения “пилы”)',
+            '- base_target_qty: базовая целевая позиция (в контрактах)',
+          ].join('\\n');
+        }
+        // donchian_atr
+        return [
+          'Donchian breakout + ATR (D1, позиционная)',
+          '',
+          'Идея: входить по пробою канала Дончиана на дневках.',
+          'Сигнал формируется по закрытию дня.',
+          '',
+          'Вход:',
+          '- Если Close > DonchianHigh(breakout_lookback) → цель: лонг (target_qty = +base_target_qty)',
+          '- Если Close < DonchianLow(breakout_lookback) → цель: шорт (target_qty = -base_target_qty)',
+          '',
+          'Выход:',
+          '- Для лонга: если Close < DonchianLow(exit_lookback) → цель: 0',
+          '- Для шорта: если Close > DonchianHigh(exit_lookback) → цель: 0',
+          '',
+          'ATR:',
+          '- ATR считается и прикладывается к сигналу для RiskGate (позиционирование/лимиты).',
+          '',
+          'Параметры:',
+          '- breakout_lookback: окно для канала входа',
+          '- exit_lookback: окно для канала выхода',
+          '- atr_period: период ATR',
+          '- atr_stop_mult: множитель ATR (для стоп-логики/сайзинга)',
+          '- base_target_qty: базовая целевая позиция (в контрактах)',
+        ].join('\\n');
+      }
+
+      async function searchFutures() {
+        const q = (document.getElementById('futQuery').value || '').trim();
+        if (!q) { alert('Введите запрос для поиска'); return; }
+        const res = await jget('/api/broker/futures/search?query=' + encodeURIComponent(q));
+        if (res && res.error) { alert(res.error); return; }
+        const sel = document.getElementById('futSelect');
+        sel.innerHTML = '<option value=\"\">— выберите фьючерс —</option>';
+        for (const it of (res.items || [])) {
+          const figi = it.figi || '';
+          const label = `${it.ticker || ''} • ${it.name || ''} • ${figi}`.trim();
+          const opt = document.createElement('option');
+          opt.value = figi;
+          opt.textContent = label;
+          sel.appendChild(opt);
+        }
+        sel.onchange = () => {
+          const v = sel.value || '';
+          if (v) document.getElementById('figiInput').value = v;
+        };
+      }
+
+      function syncParamsTemplate() {
+        const s = document.getElementById('strategySelect').value;
+        document.getElementById('paramsInput').value = JSON.stringify(defaultParams(s));
+        const desc = document.getElementById('strategyDesc');
+        if (desc) desc.textContent = strategyDescription(s);
+      }
+      document.addEventListener('DOMContentLoaded', () => {
+        const s = document.getElementById('strategySelect');
+        if (s) s.onchange = syncParamsTemplate;
+        // initial render
+        syncParamsTemplate();
+      });
+
+      async function createJob() {
+        const figi = (document.getElementById('figiInput').value || '').trim();
+        const strategy = (document.getElementById('strategySelect').value || '').trim();
+        const paramsText = (document.getElementById('paramsInput').value || '').trim();
+        if (!figi) { alert('FIGI обязателен'); return; }
+        let params = {};
+        try { params = paramsText ? JSON.parse(paramsText) : {}; }
+        catch (e) { alert('Параметры должны быть валидным JSON'); return; }
+        const res = await jpost('/api/jobs/create', { figi, strategy, params });
+        if (res && res.ok === false) { alert(res.error || 'Не удалось создать джобу'); return; }
+        alert('Джоба сохранена: ' + (res.job_id || ''));
+        await refresh();
+      }
+
       // Restore saved account_id
       const savedAccount = state.get('last_account_id', '');
       if (savedAccount) {
@@ -814,6 +953,14 @@ class UiServer:
         for inst in instruments_config.instruments:
             jid = f"{inst.figi}|{inst.strategy.name.value}"
             self._job_defs[jid] = {"figi": inst.figi, "strategy": inst.strategy.name}
+
+        # Load UI-managed jobs from DB (persisted)
+        try:
+            for j in self.store.list_ui_jobs():
+                jid = j["job_id"]
+                self._job_defs[jid] = {"figi": j["figi"], "strategy": StrategyName(j["strategy"]), "params": j.get("strategy_params") or {}}
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _account_id(self) -> Optional[str]:
         if settings.account_id:
@@ -899,6 +1046,82 @@ class UiServer:
                 mode = "sandbox" if self._job_modes.get(jid, True) else "real"
             items.append({"job_id": jid, "figi": figi, "strategy": strat, "status": status, "mode": mode})
         return _json_response({"items": items})
+
+    async def handle_job_create(self, request: web.Request) -> web.Response:
+        """
+        Create/update a UI-managed job.
+        body: { figi, strategy, params }
+        """
+        try:
+            body = await request.json()
+            figi = str((body.get("figi") or "")).strip()
+            strategy = str((body.get("strategy") or "")).strip()
+            params = body.get("params") or {}
+            if not figi:
+                return _json_response({"ok": False, "error": "FIGI обязателен"}, status=400)
+            if strategy not in {s.value for s in StrategyName}:
+                return _json_response({"ok": False, "error": "Неизвестная стратегия"}, status=400)
+            jid = f"{figi}|{strategy}"
+
+            # persist
+            self.store.set_flag(key="trading_enabled", value=self.store.get_flag(key="trading_enabled", default="1"))
+            self.store.upsert_ui_job(job_id=jid, figi=figi, strategy_name=strategy, strategy_params=dict(params))
+
+            # register in memory
+            self._job_defs[jid] = {"figi": figi, "strategy": StrategyName(strategy), "params": dict(params)}
+            return _json_response({"ok": True, "job_id": jid})
+        except Exception:  # noqa: BLE001
+            logger.exception("handle_job_create failed")
+            return _json_response({"ok": False, "error": "Не удалось создать джобу"}, status=500)
+
+    async def handle_job_delete(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        jid = str(body.get("job_id") or "")
+        if not jid:
+            return _json_response({"ok": False, "error": "job_id обязателен"}, status=400)
+        t = self._jobs.get(jid)
+        if t is not None and not t.done():
+            return _json_response({"ok": False, "error": "Сначала остановите джобу"}, status=409)
+        try:
+            self.store.delete_ui_job(job_id=jid)
+        except Exception:  # noqa: BLE001
+            pass
+        self._job_defs.pop(jid, None)
+        return _json_response({"ok": True})
+
+    async def handle_futures_search(self, request: web.Request) -> web.Response:
+        """
+        Search futures by query (ticker/name). Best-effort; depends on SDK support.
+        """
+        q = (request.query.get("query") or "").strip()
+        if not q:
+            return _json_response({"items": []})
+        if not broker_client.credentials_set():
+            return _json_response({"error": "Сначала установите токен"}, status=400)
+        try:
+            # SDK search response shape varies; we normalize to {figi, ticker, name, class_code}
+            resp = await broker_client.find_instrument(query=q)
+            found = getattr(resp, "instruments", None) or getattr(resp, "instruments_found", None) or getattr(resp, "found_instruments", None) or []
+            items = []
+            for inst in found:
+                # best-effort filter: keep only futures-like instruments if field exists
+                kind = getattr(inst, "instrument_kind", None) or getattr(inst, "kind", None)
+                if kind is not None:
+                    s = str(kind).lower()
+                    if "futures" not in s:
+                        continue
+                items.append(
+                    {
+                        "figi": getattr(inst, "figi", None),
+                        "ticker": getattr(inst, "ticker", None),
+                        "name": getattr(inst, "name", None),
+                        "class_code": getattr(inst, "class_code", None),
+                    }
+                )
+            return _json_response({"items": items[:50]})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("futures search failed")
+            return _json_response({"error": str(e)}, status=500)
 
     async def handle_job_decisions(self, request: web.Request) -> web.Response:
         """
@@ -1356,9 +1579,12 @@ async def start_ui_server(*, store: StateStore, host: str, port: int) -> web.App
     app.router.add_get("/api/status", srv.handle_status)
     app.router.add_post("/api/credentials", srv.handle_credentials)
     app.router.add_get("/api/jobs", srv.handle_jobs)
+    app.router.add_post("/api/jobs/create", srv.handle_job_create)
+    app.router.add_post("/api/jobs/delete", srv.handle_job_delete)
     app.router.add_post("/api/jobs/start", srv.handle_job_start)
     app.router.add_post("/api/jobs/stop", srv.handle_job_stop)
     app.router.add_get("/api/jobs/decisions", srv.handle_job_decisions)
+    app.router.add_get("/api/broker/futures/search", srv.handle_futures_search)
     app.router.add_get("/api/strategies", srv.handle_strategies)
     app.router.add_get("/api/positions", srv.handle_positions)
     app.router.add_get("/api/orders", srv.handle_orders)

@@ -125,6 +125,19 @@ class TinkoffClient:
     async def get_instrument(self, **kwargs) -> InstrumentResponse:
         return await self.client.instruments.get_instrument_by(**kwargs)
 
+    async def find_instrument(self, **kwargs):
+        """
+        Best-effort wrapper: different SDK versions may expose search as find_instrument/find_instruments.
+        """
+        svc = getattr(self.client, "instruments", None)
+        if svc is None:
+            raise RuntimeError("instruments service not available")
+        if hasattr(svc, "find_instrument"):
+            return await svc.find_instrument(**kwargs)
+        if hasattr(svc, "find_instruments"):
+            return await svc.find_instruments(**kwargs)
+        raise RuntimeError("instrument search API not available in SDK")
+
 
 class RuntimeClient:
     """
@@ -209,6 +222,9 @@ class RuntimeClient:
 
     async def get_instrument(self, **kwargs) -> InstrumentResponse:
         return await self._ensure().get_instrument(**kwargs)
+
+    async def find_instrument(self, **kwargs):
+        return await self._ensure().find_instrument(**kwargs)
 
 
 client = RuntimeClient()
