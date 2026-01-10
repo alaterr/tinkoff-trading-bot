@@ -368,6 +368,17 @@ INDEX_HTML = """<!doctype html>
           </div>
           <div class="muted" style="margin-top:0.5rem;">Параметры (JSON):</div>
           <textarea id="paramsInput" style="width:100%; min-height:120px; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-family: 'Monaco','Menlo',monospace; font-size: 0.85rem;">{"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1}</textarea>
+          <div class="muted" style="margin-top:0.75rem;">Лимиты (безопасность):</div>
+          <div class="status-grid" style="grid-template-columns: 1fr 1fr;">
+            <div class="status-item">
+              <span class="status-label">Max позиция (контрактов)</span>
+              <input id="maxPosInput" type="number" min="1" step="1" value="10" style="width:100%; margin-top:0.35rem;" />
+            </div>
+            <div class="status-item">
+              <span class="status-label">Max ордер (контрактов)</span>
+              <input id="maxOrderInput" type="number" min="1" step="1" value="10" style="width:100%; margin-top:0.35rem;" />
+            </div>
+          </div>
           <div class="btn-group">
             <button class="success" onclick="createJob()">💾 Сохранить джобу</button>
           </div>
@@ -485,7 +496,7 @@ INDEX_HTML = """<!doctype html>
           </div>
           <div class="table-container" style="margin-top:0.75rem;">
             <table id="btTradesTbl">
-              <thead><tr><th>Время</th><th>Сторона</th><th>Кол-во</th><th>Цена</th><th>Комиссия</th></tr></thead>
+              <thead><tr><th>Время</th><th>Сторона</th><th>Кол-во</th><th>Цена</th><th>P&L</th><th>Комиссия</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -704,7 +715,36 @@ INDEX_HTML = """<!doctype html>
                 }
                 await refresh();
               };
-              tr.children[5].appendChild(btn);
+              const actions = document.createElement('div');
+              actions.style.display = 'flex';
+              actions.style.gap = '0.5rem';
+              actions.style.flexWrap = 'wrap';
+              actions.appendChild(btn);
+
+              if (j.can_delete) {
+                const del = document.createElement('button');
+                del.className = 'danger';
+                del.textContent = '🗑 Удалить';
+                del.onclick = async () => {
+                  const ok = window.confirm('Удалить джобу? Она исчезнет из списка и из state.db.');
+                  if (!ok) return;
+                  const res = await jpost('/api/jobs/delete', { job_id: j.job_id });
+                  if (res && res.ok === false) {
+                    alert(res.error || 'Не удалось удалить джобу');
+                    return;
+                  }
+                  await refresh();
+                };
+                if (j.status === 'running') {
+                  del.disabled = true;
+                  del.style.opacity = '0.5';
+                  del.style.cursor = 'not-allowed';
+                  del.title = 'Сначала остановите джобу';
+                }
+                actions.appendChild(del);
+              }
+
+              tr.children[5].appendChild(actions);
               tb.appendChild(tr);
             }
           }
@@ -839,10 +879,19 @@ INDEX_HTML = """<!doctype html>
         }
 
         // Trades
-        fillTable('btTradesTbl', res.trades || [], ['ts','side','qty','price','commission'], {
+        fillTable('btTradesTbl', res.trades || [], ['ts','side','qty','price','pnl','commission'], {
           ts: formatDate,
           side: v => (String(v).toLowerCase().includes('buy') ? badge('BUY','success') : badge('SELL','danger')),
           price: v => v ? formatMoney(v) : '',
+          pnl: v => {
+            if (v === null || v === undefined || v === '') return '';
+            const n = parseFloat(v);
+            const s = formatMoney(v);
+            if (isNaN(n)) return s;
+            if (n > 0) return `<span style="color: var(--success); font-weight: 600;">${s}</span>`;
+            if (n < 0) return `<span style="color: var(--danger); font-weight: 600;">${s}</span>`;
+            return s;
+          },
           commission: v => v ? formatMoney(v) : '',
         });
       }
@@ -1027,11 +1076,16 @@ INDEX_HTML = """<!doctype html>
         const figi = (document.getElementById('figiInput').value || '').trim();
         const strategy = (document.getElementById('strategySelect').value || '').trim();
         const paramsText = (document.getElementById('paramsInput').value || '').trim();
+        const max_position_qty = parseInt((document.getElementById('maxPosInput').value || '10'), 10);
+        const max_order_qty = parseInt((document.getElementById('maxOrderInput').value || '10'), 10);
         if (!figi) { alert('FIGI обязателен'); return; }
+        if (!max_position_qty || max_position_qty <= 0) { alert('Max позиция должна быть > 0'); return; }
+        if (!max_order_qty || max_order_qty <= 0) { alert('Max ордер должен быть > 0'); return; }
+        if (max_order_qty > max_position_qty) { alert('Max ордер не должен быть больше Max позиции'); return; }
         let params = {};
         try { params = paramsText ? JSON.parse(paramsText) : {}; }
         catch (e) { alert('Параметры должны быть валидным JSON'); return; }
-        const res = await jpost('/api/jobs/create', { figi, strategy, params });
+        const res = await jpost('/api/jobs/create', { figi, strategy, params, max_position_qty, max_order_qty });
         if (res && res.ok === false) { alert(res.error || 'Не удалось создать джобу'); return; }
         alert('Джоба сохранена: ' + (res.job_id || ''));
         await refresh();
@@ -1086,13 +1140,21 @@ class UiServer:
                 "strategy": inst.strategy.name,
                 "params": dict(inst.strategy.parameters),
                 "instrument_config": inst,
+                "source": "config",
             }
 
         # Load UI-managed jobs from DB (persisted)
         try:
             for j in self.store.list_ui_jobs():
                 jid = j["job_id"]
-                self._job_defs[jid] = {"figi": j["figi"], "strategy": StrategyName(j["strategy"]), "params": j.get("strategy_params") or {}}
+                self._job_defs[jid] = {
+                    "figi": j["figi"],
+                    "strategy": StrategyName(j["strategy"]),
+                    "params": j.get("strategy_params") or {},
+                    "max_position_qty": j.get("max_position_qty") or 10,
+                    "max_order_qty": j.get("max_order_qty") or (j.get("max_position_qty") or 10),
+                    "source": "ui",
+                }
         except Exception:  # noqa: BLE001
             pass
 
@@ -1178,31 +1240,67 @@ class UiServer:
             mode = None
             if status == "running":
                 mode = "sandbox" if self._job_modes.get(jid, True) else "real"
-            items.append({"job_id": jid, "figi": figi, "strategy": strat, "status": status, "mode": mode})
+            src = str(meta.get("source") or ("config" if meta.get("instrument_config") is not None else "ui"))
+            items.append(
+                {
+                    "job_id": jid,
+                    "figi": figi,
+                    "strategy": strat,
+                    "status": status,
+                    "mode": mode,
+                    "can_delete": src == "ui",
+                    "source": src,
+                }
+            )
         return _json_response({"items": items})
 
     async def handle_job_create(self, request: web.Request) -> web.Response:
         """
         Create/update a UI-managed job.
-        body: { figi, strategy, params }
+        body: { figi, strategy, params, max_position_qty?, max_order_qty? }
         """
         try:
             body = await request.json()
             figi = str((body.get("figi") or "")).strip()
             strategy = str((body.get("strategy") or "")).strip()
             params = body.get("params") or {}
+            max_position_qty = body.get("max_position_qty")
+            max_order_qty = body.get("max_order_qty")
             if not figi:
                 return _json_response({"ok": False, "error": "FIGI обязателен"}, status=400)
             if strategy not in {s.value for s in StrategyName}:
                 return _json_response({"ok": False, "error": "Неизвестная стратегия"}, status=400)
+            try:
+                max_position_qty = int(max_position_qty) if max_position_qty is not None else 10
+                max_order_qty = int(max_order_qty) if max_order_qty is not None else max_position_qty
+            except Exception:  # noqa: BLE001
+                return _json_response({"ok": False, "error": "Лимиты должны быть целыми числами"}, status=400)
+            if max_position_qty <= 0 or max_order_qty <= 0:
+                return _json_response({"ok": False, "error": "Лимиты должны быть > 0"}, status=400)
+            if max_order_qty > max_position_qty:
+                return _json_response({"ok": False, "error": "max_order_qty не должен быть больше max_position_qty"}, status=400)
             jid = f"{figi}|{strategy}"
 
             # persist
             self.store.set_flag(key="trading_enabled", value=self.store.get_flag(key="trading_enabled", default="1"))
-            self.store.upsert_ui_job(job_id=jid, figi=figi, strategy_name=strategy, strategy_params=dict(params))
+            self.store.upsert_ui_job(
+                job_id=jid,
+                figi=figi,
+                strategy_name=strategy,
+                strategy_params=dict(params),
+                max_position_qty=max_position_qty,
+                max_order_qty=max_order_qty,
+            )
 
             # register in memory
-            self._job_defs[jid] = {"figi": figi, "strategy": StrategyName(strategy), "params": dict(params)}
+            self._job_defs[jid] = {
+                "figi": figi,
+                "strategy": StrategyName(strategy),
+                "params": dict(params),
+                "max_position_qty": max_position_qty,
+                "max_order_qty": max_order_qty,
+                "source": "ui",
+            }
             return _json_response({"ok": True, "job_id": jid})
         except Exception:  # noqa: BLE001
             logger.exception("handle_job_create failed")
@@ -1213,6 +1311,10 @@ class UiServer:
         jid = str(body.get("job_id") or "")
         if not jid:
             return _json_response({"ok": False, "error": "job_id обязателен"}, status=400)
+        meta = self._job_defs.get(jid) or {}
+        src = str(meta.get("source") or ("config" if meta.get("instrument_config") is not None else "ui"))
+        if src != "ui":
+            return _json_response({"ok": False, "error": "Эту джобу нельзя удалить (она из instruments_config.json)."}, status=403)
         t = self._jobs.get(jid)
         if t is not None and not t.done():
             return _json_response({"ok": False, "error": "Сначала остановите джобу"}, status=409)
@@ -1622,8 +1724,8 @@ class UiServer:
                     instrument_type="futures",
                     allow_short=True,
                     allow_margin=False,
-                    max_position_qty=10,
-                    max_order_qty=5,
+                    max_position_qty=int(meta.get("max_position_qty") or 10),
+                    max_order_qty=int(meta.get("max_order_qty") or (meta.get("max_position_qty") or 10)),
                     rollover=RolloverConfig(enabled=False),
                     strategy=StrategyConfig(name=strat, parameters=dict(meta.get("params") or {})),
                 )

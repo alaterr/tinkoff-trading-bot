@@ -20,6 +20,10 @@ class Trade:
     qty: int
     price: Decimal
     commission: Decimal
+    # Per-fill realized P&L net of commission (best-effort).
+    # - For opening trades it is typically -commission.
+    # - For closing/reducing it includes realized move minus commission.
+    pnl: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)

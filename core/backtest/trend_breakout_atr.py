@@ -120,6 +120,7 @@ def run_backtest_trend_breakout_atr(
                 side = "sell" if pos > 0 else "buy"
                 qty = abs(pos)
                 fill_price = _apply_slippage(c.close, side=side, slippage_bps=cfg.price_slippage_bps)
+                cash_before = cash
                 pos, avg_price, cash, commission = apply_futures_fill(
                     pos=pos,
                     avg_price=avg_price,
@@ -139,6 +140,7 @@ def run_backtest_trend_breakout_atr(
                         qty=qty,
                         price=fill_price,
                         commission=commission,
+                        pnl=cash - cash_before,
                     )
                 )
                 entry = stop = tp = None
@@ -196,6 +198,7 @@ def run_backtest_trend_breakout_atr(
             side = "buy" if delta > 0 else "sell"
             qty = abs(delta)
             fill_price = _apply_slippage(c.close, side=side, slippage_bps=cfg.price_slippage_bps)
+            cash_before = cash
             pos, avg_price, cash, commission = apply_futures_fill(
                 pos=pos,
                 avg_price=avg_price,
@@ -215,6 +218,7 @@ def run_backtest_trend_breakout_atr(
                     qty=qty,
                     price=fill_price,
                     commission=commission,
+                    pnl=cash - cash_before,
                 )
             )
 

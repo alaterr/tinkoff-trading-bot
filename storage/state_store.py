@@ -163,10 +163,13 @@ class StateStore:
                 strategy_name TEXT NOT NULL,
                 strategy_params_json TEXT NOT NULL DEFAULT '{}',
                 instrument_type TEXT NOT NULL DEFAULT 'futures',
+                max_position_qty INTEGER,
+                max_order_qty INTEGER,
                 created_at TEXT NOT NULL
             )
             """
         )
+        self._migrate_ui_jobs()
 
         # Generic per-(strategy, figi) key-value state (entry price, stops, etc.)
         self._conn.execute(
@@ -182,6 +185,22 @@ class StateStore:
             """
         )
         self._conn.commit()
+
+    def _migrate_ui_jobs(self) -> None:
+        """
+        Best-effort, idempotent schema migration for ui_jobs.
+        Keeps backward compatibility with existing state.db files.
+        """
+        assert self._conn is not None
+        try:
+            cols = [r[1] for r in self._conn.execute("PRAGMA table_info(ui_jobs)").fetchall()]
+            if "max_position_qty" not in cols:
+                self._conn.execute("ALTER TABLE ui_jobs ADD COLUMN max_position_qty INTEGER")
+            if "max_order_qty" not in cols:
+                self._conn.execute("ALTER TABLE ui_jobs ADD COLUMN max_order_qty INTEGER")
+        except Exception:
+            # If migration fails, we continue with minimal functionality.
+            pass
 
     def set_job_decision(self, *, job_id: str, payload: dict[str, Any], ts: Optional[datetime] = None) -> None:
         assert self._conn is not None
@@ -222,6 +241,8 @@ class StateStore:
         strategy_name: str,
         strategy_params: dict[str, Any],
         instrument_type: str = "futures",
+        max_position_qty: Optional[int] = None,
+        max_order_qty: Optional[int] = None,
         created_at: Optional[datetime] = None,
     ) -> None:
         assert self._conn is not None
@@ -229,13 +250,17 @@ class StateStore:
             created_at = datetime.now(timezone.utc)
         self._conn.execute(
             """
-            INSERT INTO ui_jobs(job_id, figi, strategy_name, strategy_params_json, instrument_type, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO ui_jobs(
+                job_id, figi, strategy_name, strategy_params_json, instrument_type, max_position_qty, max_order_qty, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 figi=excluded.figi,
                 strategy_name=excluded.strategy_name,
                 strategy_params_json=excluded.strategy_params_json,
-                instrument_type=excluded.instrument_type
+                instrument_type=excluded.instrument_type,
+                max_position_qty=excluded.max_position_qty,
+                max_order_qty=excluded.max_order_qty
             """,
             (
                 job_id,
@@ -243,6 +268,8 @@ class StateStore:
                 strategy_name,
                 json.dumps(strategy_params or {}, ensure_ascii=False, sort_keys=True),
                 instrument_type,
+                None if max_position_qty is None else int(max_position_qty),
+                None if max_order_qty is None else int(max_order_qty),
                 _dt_to_str(created_at),
             ),
         )
@@ -256,10 +283,15 @@ class StateStore:
     def list_ui_jobs(self) -> list[dict[str, Any]]:
         assert self._conn is not None
         rows = self._conn.execute(
-            "SELECT job_id, figi, strategy_name, strategy_params_json, instrument_type, created_at FROM ui_jobs ORDER BY created_at DESC"
+            """
+            SELECT job_id, figi, strategy_name, strategy_params_json, instrument_type,
+                   max_position_qty, max_order_qty, created_at
+            FROM ui_jobs
+            ORDER BY created_at DESC
+            """
         ).fetchall()
         out: list[dict[str, Any]] = []
-        for job_id, figi, strategy_name, params_json, instrument_type, created_at in rows:
+        for job_id, figi, strategy_name, params_json, instrument_type, max_position_qty, max_order_qty, created_at in rows:
             try:
                 params = json.loads(params_json or "{}")
             except Exception:
@@ -271,6 +303,8 @@ class StateStore:
                     "strategy": str(strategy_name),
                     "strategy_params": params,
                     "instrument_type": str(instrument_type),
+                    "max_position_qty": None if max_position_qty is None else int(max_position_qty),
+                    "max_order_qty": None if max_order_qty is None else int(max_order_qty),
                     "created_at": str(created_at),
                 }
             )

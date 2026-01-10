@@ -70,6 +70,7 @@ def run_backtest_target_qty(
                 qty = abs(delta)
                 fill_price = _apply_slippage(c.close, side=side, slippage_bps=cfg.price_slippage_bps)
                 if cfg.futures_price_multiplier is not None:
+                    cash_before = cash
                     pos, avg_price, cash, commission = apply_futures_fill(
                         pos=pos,
                         avg_price=avg_price,
@@ -80,7 +81,10 @@ def run_backtest_target_qty(
                         price_multiplier=cfg.futures_price_multiplier,
                         commission_bps=cfg.commission_bps,
                     )
+                    pnl = cash - cash_before
                 else:
+                    pos_before = pos
+                    avg_before = avg_price
                     notional = fill_price * Decimal(qty)
                     commission = (cfg.commission_bps / Decimal("10000")) * abs(notional)
                     # Cashflow: buy consumes cash; sell increases cash
@@ -88,6 +92,28 @@ def run_backtest_target_qty(
                         cash -= notional + commission
                     else:
                         cash += notional - commission
+                    # Best-effort realized P&L net of commission (spot-like).
+                    pnl = -commission
+                    delta_signed = qty if side == "buy" else -qty
+                    if pos_before != 0 and avg_before is not None and (pos_before * delta_signed) < 0:
+                        closing = min(abs(pos_before), abs(delta_signed))
+                        sign = Decimal("1") if pos_before > 0 else Decimal("-1")
+                        realized = (fill_price - avg_before) * Decimal(closing) * sign
+                        pnl = realized - commission
+                    # Update avg_price for next fills (best-effort)
+                    new_pos = pos_before + delta_signed
+                    if new_pos == 0:
+                        avg_price = None
+                    elif (pos_before == 0) or (avg_before is None):
+                        avg_price = fill_price
+                    elif (pos_before * delta_signed) > 0:
+                        w1 = Decimal(abs(pos_before))
+                        w2 = Decimal(abs(delta_signed))
+                        avg_price = ((w1 * avg_before) + (w2 * fill_price)) / Decimal(abs(new_pos))
+                    else:
+                        # reversed -> new entry at fill_price
+                        if abs(delta_signed) > abs(pos_before):
+                            avg_price = fill_price
                     pos = target
 
                 trades.append(
@@ -99,6 +125,7 @@ def run_backtest_target_qty(
                         qty=qty,
                         price=fill_price,
                         commission=commission,
+                        pnl=pnl,
                     )
                 )
 
