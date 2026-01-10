@@ -7,12 +7,17 @@ from typing import Callable, List, Optional
 from core.models.entities import Candle, Signal
 from reports.stats import EquityPoint, Trade
 
+from core.backtest.futures import apply_futures_fill, futures_equity
+
 
 @dataclass(frozen=True)
 class BacktestConfig:
     initial_equity: Decimal = Decimal("1000000")
     price_slippage_bps: Decimal = Decimal("0")  # 10 bps = 0.10%
     commission_bps: Decimal = Decimal("0")  # applied on notional (abs(qty*price))
+    # Futures backtest: currency amount per +1.0 price move for 1 contract.
+    # If None -> use spot-like accounting (legacy).
+    futures_price_multiplier: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +53,7 @@ def run_backtest_target_qty(
 
     cash = cfg.initial_equity
     pos = 0
+    avg_price: Optional[Decimal] = None
     trades: List[Trade] = []
     equity: List[EquityPoint] = []
 
@@ -63,15 +69,26 @@ def run_backtest_target_qty(
                 side = "buy" if delta > 0 else "sell"
                 qty = abs(delta)
                 fill_price = _apply_slippage(c.close, side=side, slippage_bps=cfg.price_slippage_bps)
-                notional = fill_price * Decimal(qty)
-                commission = (cfg.commission_bps / Decimal("10000")) * abs(notional)
-
-                # Cashflow: buy consumes cash; sell increases cash
-                if side == "buy":
-                    cash -= notional + commission
+                if cfg.futures_price_multiplier is not None:
+                    pos, avg_price, cash, commission = apply_futures_fill(
+                        pos=pos,
+                        avg_price=avg_price,
+                        cash=cash,
+                        side=side,
+                        qty=qty,
+                        price=fill_price,
+                        price_multiplier=cfg.futures_price_multiplier,
+                        commission_bps=cfg.commission_bps,
+                    )
                 else:
-                    cash += notional - commission
-                pos = target
+                    notional = fill_price * Decimal(qty)
+                    commission = (cfg.commission_bps / Decimal("10000")) * abs(notional)
+                    # Cashflow: buy consumes cash; sell increases cash
+                    if side == "buy":
+                        cash -= notional + commission
+                    else:
+                        cash += notional - commission
+                    pos = target
 
                 trades.append(
                     Trade(
@@ -86,7 +103,16 @@ def run_backtest_target_qty(
                 )
 
         # Mark-to-market
-        mtm = cash + (Decimal(pos) * c.close)
+        if cfg.futures_price_multiplier is not None:
+            mtm = futures_equity(
+                cash=cash,
+                pos=pos,
+                avg_price=avg_price,
+                price=c.close,
+                price_multiplier=cfg.futures_price_multiplier,
+            )
+        else:
+            mtm = cash + (Decimal(pos) * c.close)
         equity.append(EquityPoint(ts=c.time.isoformat(), equity=mtm))
 
     return BacktestResult(trades=trades, equity=equity)

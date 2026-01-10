@@ -1284,6 +1284,7 @@ class UiServer:
         from decimal import Decimal
 
         from core.backtest.engine import BacktestConfig, run_backtest_target_qty
+        from core.backtest.futures import futures_spec_from_instrument
         from core.backtest.trend_breakout_atr import TrendBreakoutParams, run_backtest_trend_breakout_atr
         from core.data.candles import CandleRepository
         from reports.stats import summarize
@@ -1293,23 +1294,78 @@ class UiServer:
         await broker_client.ainit()
         repo = CandleRepository(broker=broker_client)
 
+        # Fetch instrument spec (best-effort) to make futures PnL/size realistic.
+        inst = None
+        try:
+            try:
+                from t_tech.invest.grpc.instruments_pb2 import INSTRUMENT_ID_TYPE_FIGI
+
+                id_type = INSTRUMENT_ID_TYPE_FIGI
+            except Exception:  # noqa: BLE001
+                id_type = 1
+            resp = await broker_client.get_instrument(id_type=id_type, id=figi)
+            inst = getattr(resp, "instrument", None)
+        except Exception:  # noqa: BLE001
+            inst = None
+        f_spec = futures_spec_from_instrument(inst)
+
         to_ts = datetime.now(timezone.utc)
         from_ts = to_ts - timedelta(days=days + 30)  # padding for indicators
+        logger.info(
+            "backtest_run jid=%s figi=%s strat=%s days=%s from_ts=%s to_ts=%s params=%s",
+            jid,
+            figi,
+            strat.value,
+            days,
+            from_ts.isoformat(),
+            to_ts.isoformat(),
+            params,
+        )
 
         bt_cfg = BacktestConfig(
             initial_equity=Decimal(initial_equity),
             price_slippage_bps=Decimal(str(instruments_config.global_execution.price_slippage_bps)),
             commission_bps=Decimal(str(instruments_config.global_execution.commission_bps)),
+            futures_price_multiplier=f_spec.price_multiplier,
         )
 
         if strat.value in {"donchian_atr", "ema_atr"}:
             # D1 candles only
-            candles = await repo.fetch_range(figi=figi, from_ts=from_ts, to_ts=to_ts, interval=CandleInterval.CANDLE_INTERVAL_DAY)
-            # keep last `days` days (closed)
-            cutoff = to_ts - timedelta(days=days)
-            candles = [c for c in candles if c.time >= cutoff]
+            candles_all = await repo.fetch_range(
+                figi=figi,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                interval=CandleInterval.CANDLE_INTERVAL_DAY,
+            )
+            if not candles_all:
+                logger.warning(
+                    "backtest_run no candles returned figi=%s interval=D1 from_ts=%s to_ts=%s",
+                    figi,
+                    from_ts.isoformat(),
+                    to_ts.isoformat(),
+                )
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "Не удалось загрузить свечи (D1). Проверь FIGI/токен или что по инструменту есть история.",
+                        "debug": {"interval": "D1", "from_ts": from_ts.isoformat(), "to_ts": to_ts.isoformat()},
+                    },
+                    status=500,
+                )
+
+            # Use last available candle as end of period (important for expired futures).
+            end_ts = candles_all[-1].time
+            cutoff = end_ts - timedelta(days=days)
+            candles = [c for c in candles_all if c.time >= cutoff]
             if not candles:
-                return _json_response({"ok": False, "error": "Не удалось загрузить свечи"}, status=500)
+                candles = candles_all[-min(len(candles_all), days) :]
+            logger.info(
+                "backtest_run candles_loaded interval=D1 total=%s used=%s first=%s last=%s",
+                len(candles_all),
+                len(candles),
+                candles[0].time.isoformat() if candles else None,
+                candles[-1].time.isoformat() if candles else None,
+            )
 
             if strat.value == "donchian_atr":
                 from app.strategies.positional.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
@@ -1332,6 +1388,16 @@ class UiServer:
                     "days": days,
                     "initial_equity": str(bt_cfg.initial_equity),
                     "final_equity": str(res.equity[-1].equity if res.equity else bt_cfg.initial_equity),
+                    "instrument_spec": {
+                        "price_multiplier": str(f_spec.price_multiplier),
+                        "currency": f_spec.currency,
+                        "lot": f_spec.lot,
+                        "min_price_increment": None if f_spec.min_price_increment is None else str(f_spec.min_price_increment),
+                        "min_price_increment_amount": None
+                        if f_spec.min_price_increment_amount is None
+                        else str(f_spec.min_price_increment_amount),
+                        "source": f_spec.source,
+                    },
                     "summary": {
                         "trades": summ.trades,
                         "winrate": summ.winrate,
@@ -1346,14 +1412,55 @@ class UiServer:
         if strat.value == "trend_breakout_atr":
             tf = str(params.get("timeframe") or "1h")
             # Intraday + D1
-            candles_tf = await repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf)
-            cutoff = to_ts - timedelta(days=days)
-            candles_tf = [c for c in candles_tf if c.time >= cutoff]
+            candles_tf_all = await repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf)
+            if not candles_tf_all:
+                logger.warning(
+                    "backtest_run no candles returned figi=%s interval=%s from_ts=%s to_ts=%s",
+                    figi,
+                    tf,
+                    from_ts.isoformat(),
+                    to_ts.isoformat(),
+                )
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "Не удалось загрузить свечи (интрадей). Возможно, диапазон слишком большой или по инструменту нет истории.",
+                        "debug": {"interval": tf, "from_ts": from_ts.isoformat(), "to_ts": to_ts.isoformat()},
+                    },
+                    status=500,
+                )
+            end_tf = candles_tf_all[-1].time
+            cutoff_tf = end_tf - timedelta(days=days)
+            candles_tf = [c for c in candles_tf_all if c.time >= cutoff_tf]
+            if not candles_tf:
+                candles_tf = candles_tf_all[-min(len(candles_tf_all), 24 * days) :]
 
             d1_from = to_ts - timedelta(days=days + int(params.get("trend_lookback", 50)) + 60)
             candles_d1 = await repo.fetch_range(figi=figi, from_ts=d1_from, to_ts=to_ts, interval=CandleInterval.CANDLE_INTERVAL_DAY)
-            if not candles_tf or not candles_d1:
-                return _json_response({"ok": False, "error": "Не удалось загрузить свечи"}, status=500)
+            if not candles_d1:
+                logger.warning(
+                    "backtest_run no candles returned figi=%s interval=D1 from_ts=%s to_ts=%s",
+                    figi,
+                    d1_from.isoformat(),
+                    to_ts.isoformat(),
+                )
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "Не удалось загрузить свечи (D1 для тренда). Проверь FIGI/токен или историю инструмента.",
+                        "debug": {"interval": "D1", "from_ts": d1_from.isoformat(), "to_ts": to_ts.isoformat()},
+                    },
+                    status=500,
+                )
+            logger.info(
+                "backtest_run candles_loaded interval=%s tf_total=%s tf_used=%s d1=%s tf_first=%s tf_last=%s",
+                tf,
+                len(candles_tf_all),
+                len(candles_tf),
+                len(candles_d1),
+                candles_tf[0].time.isoformat() if candles_tf else None,
+                candles_tf[-1].time.isoformat() if candles_tf else None,
+            )
 
             p = TrendBreakoutParams(
                 timeframe=tf,
@@ -1364,8 +1471,17 @@ class UiServer:
                 atr_tp_mult=Decimal(str(params.get("atr_tp_mult", "3"))),
                 risk_per_trade_pct=Decimal(str(params.get("risk_per_trade_pct", "0.5"))),
             )
+            inst_cfg = meta.get("instrument_config")
+            max_pos = int(getattr(inst_cfg, "max_position_qty", None) or 10)
+            max_order = int(getattr(inst_cfg, "max_order_qty", None) or max_pos)
             trades, equity = run_backtest_trend_breakout_atr(
-                figi=figi, candles_tf=candles_tf, candles_d1=candles_d1, params=p, cfg=bt_cfg
+                figi=figi,
+                candles_tf=candles_tf,
+                candles_d1=candles_d1,
+                params=p,
+                cfg=bt_cfg,
+                max_position_qty=max_pos,
+                max_order_qty=max_order,
             )
             summ = summarize(trades, equity)
             return _json_response(
@@ -1376,6 +1492,18 @@ class UiServer:
                     "days": days,
                     "initial_equity": str(bt_cfg.initial_equity),
                     "final_equity": str(equity[-1].equity if equity else bt_cfg.initial_equity),
+                    "instrument_spec": {
+                        "price_multiplier": str(f_spec.price_multiplier),
+                        "currency": f_spec.currency,
+                        "lot": f_spec.lot,
+                        "min_price_increment": None if f_spec.min_price_increment is None else str(f_spec.min_price_increment),
+                        "min_price_increment_amount": None
+                        if f_spec.min_price_increment_amount is None
+                        else str(f_spec.min_price_increment_amount),
+                        "source": f_spec.source,
+                        "max_position_qty": max_pos,
+                        "max_order_qty": max_order,
+                    },
                     "summary": {
                         "trades": summ.trades,
                         "winrate": summ.winrate,

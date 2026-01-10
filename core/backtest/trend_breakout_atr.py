@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from app.strategies.positional.indicators import atr, donchian_high, donchian_low, ema
 from core.backtest.engine import BacktestConfig, _apply_slippage
+from core.backtest.futures import apply_futures_fill, futures_equity
 from core.models.entities import Candle
 from reports.stats import EquityPoint, Trade
 
@@ -63,6 +64,8 @@ def run_backtest_trend_breakout_atr(
     candles_d1: List[Candle],
     params: TrendBreakoutParams,
     cfg: BacktestConfig,
+    max_position_qty: Optional[int] = None,
+    max_order_qty: Optional[int] = None,
 ) -> tuple[List[Trade], List[EquityPoint]]:
     """
     Backtest:
@@ -80,6 +83,7 @@ def run_backtest_trend_breakout_atr(
 
     cash = cfg.initial_equity
     pos = 0
+    avg_price: Optional[Decimal] = None
     entry: Optional[Decimal] = None
     stop: Optional[Decimal] = None
     tp: Optional[Decimal] = None
@@ -88,13 +92,14 @@ def run_backtest_trend_breakout_atr(
     equity: List[EquityPoint] = []
 
     risk_frac = _norm_risk_pct(params.risk_per_trade_pct)
+    pm = cfg.futures_price_multiplier if cfg.futures_price_multiplier is not None else Decimal("1")
 
     for i in range(len(candles_tf)):
         window = candles_tf[: i + 1]
         c = candles_tf[i]
 
         # update mark-to-market first (for sizing)
-        mtm = cash + (Decimal(pos) * c.close)
+        mtm = futures_equity(cash=cash, pos=pos, avg_price=avg_price, price=c.close, price_multiplier=pm)
 
         # SL/TP check (close-based)
         if pos != 0 and entry is not None:
@@ -115,12 +120,16 @@ def run_backtest_trend_breakout_atr(
                 side = "sell" if pos > 0 else "buy"
                 qty = abs(pos)
                 fill_price = _apply_slippage(c.close, side=side, slippage_bps=cfg.price_slippage_bps)
-                notional = fill_price * Decimal(qty)
-                commission = (cfg.commission_bps / Decimal("10000")) * abs(notional)
-                if side == "buy":
-                    cash -= notional + commission
-                else:
-                    cash += notional - commission
+                pos, avg_price, cash, commission = apply_futures_fill(
+                    pos=pos,
+                    avg_price=avg_price,
+                    cash=cash,
+                    side=side,
+                    qty=qty,
+                    price=fill_price,
+                    price_multiplier=pm,
+                    commission_bps=cfg.commission_bps,
+                )
                 trades.append(
                     Trade(
                         ts=c.time.isoformat(),
@@ -132,9 +141,8 @@ def run_backtest_trend_breakout_atr(
                         commission=commission,
                     )
                 )
-                pos = 0
                 entry = stop = tp = None
-                mtm = cash  # flat
+                mtm = futures_equity(cash=cash, pos=pos, avg_price=avg_price, price=c.close, price_multiplier=pm)
 
         # Indicator values
         if len(window) < max(params.breakout_lookback, params.atr_period) + 2:
@@ -154,7 +162,8 @@ def run_backtest_trend_breakout_atr(
             if risk_frac > 0 and a > 0 and params.atr_stop_mult > 0:
                 risk_budget = mtm * risk_frac
                 stop_dist = a * params.atr_stop_mult
-                qty = int((risk_budget / stop_dist).to_integral_value(rounding="ROUND_FLOOR"))
+                per_contract_risk = stop_dist * pm
+                qty = int((risk_budget / per_contract_risk).to_integral_value(rounding="ROUND_FLOOR")) if per_contract_risk > 0 else 0
                 if qty <= 0:
                     qty = 1
             else:
@@ -172,19 +181,31 @@ def run_backtest_trend_breakout_atr(
             elif pos < 0 and c.close > upper and trend_dir > 0:
                 target = qty
 
+        if max_position_qty is not None and max_position_qty > 0:
+            if target > max_position_qty:
+                target = max_position_qty
+            elif target < -max_position_qty:
+                target = -max_position_qty
+
         # Execute position change
         delta = target - pos
+        if max_order_qty is not None and max_order_qty > 0 and abs(delta) > max_order_qty:
+            delta = max_order_qty if delta > 0 else -max_order_qty
+            target = pos + delta
         if delta != 0:
             side = "buy" if delta > 0 else "sell"
             qty = abs(delta)
             fill_price = _apply_slippage(c.close, side=side, slippage_bps=cfg.price_slippage_bps)
-            notional = fill_price * Decimal(qty)
-            commission = (cfg.commission_bps / Decimal("10000")) * abs(notional)
-            if side == "buy":
-                cash -= notional + commission
-            else:
-                cash += notional - commission
-            pos = target
+            pos, avg_price, cash, commission = apply_futures_fill(
+                pos=pos,
+                avg_price=avg_price,
+                cash=cash,
+                side=side,
+                qty=qty,
+                price=fill_price,
+                price_multiplier=pm,
+                commission_bps=cfg.commission_bps,
+            )
             trades.append(
                 Trade(
                     ts=c.time.isoformat(),
@@ -209,7 +230,7 @@ def run_backtest_trend_breakout_atr(
             else:
                 entry = stop = tp = None
 
-        mtm = cash + (Decimal(pos) * c.close)
+        mtm = futures_equity(cash=cash, pos=pos, avg_price=avg_price, price=c.close, price_multiplier=pm)
         equity.append(EquityPoint(ts=c.time.isoformat(), equity=mtm))
 
     return trades, equity
