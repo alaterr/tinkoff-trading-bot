@@ -502,6 +502,14 @@ INDEX_HTML = """<!doctype html>
           </div>
           <div class="muted" style="margin-top:0.75rem;">График цены и точки сделок</div>
           <div class="table-container" style="margin-top:0.5rem; padding: 0.75rem;">
+            <div style="display:flex; justify-content: space-between; align-items:center; gap: 0.5rem; margin-bottom: 0.5rem;">
+              <div class="muted">Колесо мыши: zoom • Перетаскивание: пан</div>
+              <div style="display:flex; gap: 0.5rem; align-items:center;">
+                <button id="btZoomOut" class="warning" style="padding: 0.45rem 0.7rem;">−</button>
+                <button id="btZoomReset" style="padding: 0.45rem 0.7rem;">Сброс</button>
+                <button id="btZoomIn" class="success" style="padding: 0.45rem 0.7rem;">+</button>
+              </div>
+            </div>
             <canvas id="btPriceChart" height="260" style="width:100%; display:block;"></canvas>
           </div>
         </div>
@@ -907,6 +915,49 @@ INDEX_HTML = """<!doctype html>
         }
       }
 
+      // Backtest chart view state (zoom/pan) – index window.
+      const btChartState = { start: 0, end: 0, n: 0 };
+      function btClamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function btEnsureWindow(n) {
+        if (!n || n < 2) return;
+        if (btChartState.n !== n || btChartState.end <= btChartState.start) {
+          btChartState.n = n;
+          btChartState.start = 0;
+          btChartState.end = n - 1;
+        }
+      }
+      function btSetZoom(n, factor, anchorFrac) {
+        btEnsureWindow(n);
+        const minWin = Math.min(80, n - 1); // don't zoom too far in
+        const maxWin = n - 1;
+        const curWin = btChartState.end - btChartState.start;
+        const newWin = btClamp(Math.round(curWin * factor), minWin, maxWin);
+        const a = btClamp(anchorFrac ?? 0.5, 0, 1);
+        const anchorIdx = btChartState.start + Math.round(curWin * a);
+        let newStart = anchorIdx - Math.round(newWin * a);
+        let newEnd = newStart + newWin;
+        if (newStart < 0) { newStart = 0; newEnd = newWin; }
+        if (newEnd > n - 1) { newEnd = n - 1; newStart = (n - 1) - newWin; }
+        btChartState.start = btClamp(newStart, 0, n - 2);
+        btChartState.end = btClamp(newEnd, btChartState.start + 1, n - 1);
+      }
+      function btPan(n, deltaFrac) {
+        btEnsureWindow(n);
+        const win = btChartState.end - btChartState.start;
+        const shift = Math.round(win * deltaFrac);
+        let ns = btChartState.start + shift;
+        let ne = btChartState.end + shift;
+        if (ns < 0) { ns = 0; ne = win; }
+        if (ne > n - 1) { ne = n - 1; ns = (n - 1) - win; }
+        btChartState.start = btClamp(ns, 0, n - 2);
+        btChartState.end = btClamp(ne, btChartState.start + 1, n - 1);
+      }
+      function btReset(n) {
+        btChartState.n = n;
+        btChartState.start = 0;
+        btChartState.end = Math.max(1, n - 1);
+      }
+
       function drawBacktestPriceChart(priceSeries, trades) {
         const canvas = document.getElementById('btPriceChart');
         if (!canvas) return;
@@ -936,16 +987,63 @@ INDEX_HTML = """<!doctype html>
         const ih = h - padT - padB;
 
         // Parse
-        const xs = [];
-        const ys = [];
+        const xsAll = [];
+        const ysAll = [];
         for (const p of priceSeries) {
           const t = (p.ts || p.time || p.datetime || '').toString();
           const y = parseFloat(p.close);
           if (!t || !isFinite(y)) continue;
-          xs.push(t);
-          ys.push(y);
+          xsAll.push(t);
+          ysAll.push(y);
         }
-        if (ys.length < 2) return;
+        if (ysAll.length < 2) return;
+
+        // Bind controls once per page
+        if (!canvas._btBound) {
+          canvas._btBound = true;
+          // Wheel zoom
+          canvas.addEventListener('wheel', (ev) => {
+            ev.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const x = (ev.clientX - rect.left);
+            const frac = btClamp((x - padL) / iw, 0, 1);
+            const factor = ev.deltaY < 0 ? 0.8 : 1.25;
+            btSetZoom(xsAll.length, factor, frac);
+            drawBacktestPriceChart(canvas._btSeries || [], canvas._btTrades || []);
+          }, { passive: false });
+
+          // Drag pan
+          let dragging = false;
+          let lastX = 0;
+          canvas.addEventListener('mousedown', (ev) => { dragging = true; lastX = ev.clientX; });
+          window.addEventListener('mouseup', () => { dragging = false; });
+          window.addEventListener('mousemove', (ev) => {
+            if (!dragging) return;
+            const dx = ev.clientX - lastX;
+            lastX = ev.clientX;
+            btPan(xsAll.length, -dx / (iw || 1));
+            drawBacktestPriceChart(canvas._btSeries || [], canvas._btTrades || []);
+          });
+
+          // Buttons
+          const zIn = document.getElementById('btZoomIn');
+          const zOut = document.getElementById('btZoomOut');
+          const zReset = document.getElementById('btZoomReset');
+          if (zIn) zIn.onclick = () => { btSetZoom(xsAll.length, 0.8, 0.5); drawBacktestPriceChart(canvas._btSeries || [], canvas._btTrades || []); };
+          if (zOut) zOut.onclick = () => { btSetZoom(xsAll.length, 1.25, 0.5); drawBacktestPriceChart(canvas._btSeries || [], canvas._btTrades || []); };
+          if (zReset) zReset.onclick = () => { btReset(xsAll.length); drawBacktestPriceChart(canvas._btSeries || [], canvas._btTrades || []); };
+        }
+
+        // Persist latest data for interactive redraws
+        canvas._btSeries = priceSeries;
+        canvas._btTrades = trades;
+
+        btEnsureWindow(xsAll.length);
+        const s0 = btClamp(btChartState.start, 0, xsAll.length - 2);
+        const e0 = btClamp(btChartState.end, s0 + 1, xsAll.length - 1);
+        const xs = xsAll.slice(s0, e0 + 1);
+        const ys = ysAll.slice(s0, e0 + 1);
+
         let ymin = Math.min(...ys);
         let ymax = Math.max(...ys);
         if (ymax === ymin) { ymax += 1; ymin -= 1; }
