@@ -1,6 +1,6 @@
-# Tinkoff Trading Bot Helm Chart
+# Semantix AI Trading Helm Chart
 
-Helm chart for deploying Tinkoff Trading Bot to Kubernetes.
+Helm chart for deploying Semantix AI Trading to Kubernetes.
 
 ## Prerequisites
 

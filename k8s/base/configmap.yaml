@@ -7,6 +7,8 @@ data:
   # Default: sandbox mode ON (safe).
   SANDBOX: "true"
   I_KNOW_WHAT_I_AM_DOING: "false"
+  # Safety: never auto-start trading loops on boot. Start jobs from UI.
+  AUTO_START: "false"
 
   # Bot configuration file (mounted into /data/instruments_config.json)
   instruments_config.json: |

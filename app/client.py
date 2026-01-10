@@ -128,6 +128,23 @@ class RuntimeClient:
     def credentials_set(self) -> bool:
         return bool(self._token)
 
+    def current_sandbox(self) -> Optional[bool]:
+        """
+        Current broker mode for this process.
+        - None: token not set yet
+        - True: sandbox
+        - False: real
+        """
+        if not self._token:
+            return None
+        return bool(self._sandbox)
+
+    def current_mode(self) -> str:
+        v = self.current_sandbox()
+        if v is None:
+            return "unknown"
+        return "sandbox" if v else "real"
+
     async def set_credentials(self, *, token: str, sandbox: bool) -> None:
         # Swap client instance (best-effort close previous)
         self._token = token

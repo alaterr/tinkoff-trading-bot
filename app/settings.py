@@ -5,7 +5,8 @@ from pydantic import BaseSettings
 
 
 class Settings(BaseSettings):
-    app_name: str = "qwertyo1"
+    # Used as SDK app_name (client metadata). Keep it stable and ASCII.
+    app_name: str = "SemantixAITrading"
     # Token may be provided via env (.env) or set at runtime via UI (job mode).
     token: Optional[str] = None
     account_id: Optional[str] = None

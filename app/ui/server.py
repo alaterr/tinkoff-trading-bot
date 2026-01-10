@@ -27,7 +27,7 @@ INDEX_HTML = """<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Tinkoff Trading Bot UI</title>
+    <title>Semantix AI Trading</title>
     <style>
       :root {
         --bg-primary: #0f172a;
@@ -321,8 +321,8 @@ INDEX_HTML = """<!doctype html>
   </head>
   <body>
     <div class="header">
-      <h1>🚀 Tinkoff Trading Bot</h1>
-      <div class="subtitle">Real-time monitoring & control • No authentication (MVP)</div>
+      <h1>Semantix AI Trading</h1>
+      <div class="subtitle">Monitoring & manual control • No authentication (MVP)</div>
     </div>
     <div class="container">
       <div class="row">
@@ -335,10 +335,10 @@ INDEX_HTML = """<!doctype html>
               <span class="status-value" id="tokenSet">?</span>
             </div>
           </div>
-          <input id="tokenInput" placeholder="Tinkoff token" type="password" />
+          <input id="tokenInput" placeholder="Broker API token" type="password" />
           <input id="accountInput" placeholder="ACCOUNT_ID (optional)" />
           <div class="btn-group">
-            <button class="success" onclick="setCredentials()">Set Token</button>
+            <button class="success" onclick="setCredentials()">Set API Token</button>
           </div>
         </div>
         <div class="card fade-in">
@@ -397,11 +397,11 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
-          <h3>🎯 Jobs (Manual Trading)</h3>
-          <div class="muted">Start/stop strategy loops manually</div>
+          <h3>🎯 Trading Jobs</h3>
+          <div class="muted">Trading does not start until you press <b>Start</b>. Choose mode: <code>sandbox</code> or <code>real</code>.</div>
           <div class="table-container">
             <table id="jobsTbl">
-              <thead><tr><th>Job ID</th><th>FIGI</th><th>Strategy</th><th>Status</th><th>Action</th></tr></thead>
+              <thead><tr><th>Job ID</th><th>FIGI</th><th>Strategy</th><th>Status</th><th>Mode</th><th>Action</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -486,8 +486,18 @@ INDEX_HTML = """<!doctype html>
         }
       };
 
-      async function jget(url){ const r=await fetch(url); return await r.json(); }
-      async function jpost(url, body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); return await r.json(); }
+      async function jget(url){
+        const r = await fetch(url);
+        const j = await r.json();
+        if (!r.ok) j._http_status = r.status;
+        return j;
+      }
+      async function jpost(url, body){
+        const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}) });
+        const j = await r.json();
+        if (!r.ok) j._http_status = r.status;
+        return j;
+      }
 
       function formatDate(s) {
         if (!s) return '';
@@ -531,6 +541,7 @@ INDEX_HTML = """<!doctype html>
       async function refresh() {
         try {
           const st = await jget('/api/status');
+          const tokenSet = !!st.token_set;
           
           // Status updates with badges
           document.getElementById('sandbox').innerHTML = st.sandbox ? badge('Yes', 'success') : badge('No', 'warning');
@@ -549,19 +560,67 @@ INDEX_HTML = """<!doctype html>
               const tr = document.createElement('tr');
               tr.className = 'fade-in';
               const statusBadge = j.status === 'running' ? badge('Running', 'success') : badge('Stopped', 'danger');
-              tr.innerHTML = `<td><code>${j.job_id}</code></td><td><code>${j.figi}</code></td><td>${j.strategy}</td><td>${statusBadge}</td><td></td>`;
+              const modeBadge = j.mode ? badge(j.mode.toUpperCase(), j.mode === 'real' ? 'danger' : 'info') : badge('—', 'warning');
+              tr.innerHTML = `<td><code>${j.job_id}</code></td><td><code>${j.figi}</code></td><td>${j.strategy}</td><td>${statusBadge}</td><td></td><td></td>`;
+
+              // Mode selector (used when starting)
+              const modeSel = document.createElement('select');
+              modeSel.style.width = '100%';
+              modeSel.style.padding = '0.6rem';
+              modeSel.style.background = 'var(--bg-primary)';
+              modeSel.style.border = '1px solid var(--border)';
+              modeSel.style.borderRadius = '6px';
+              modeSel.style.color = 'var(--text-primary)';
+              modeSel.innerHTML = `
+                <option value="sandbox">sandbox</option>
+                <option value="real">real</option>
+              `;
+              // Persist last chosen mode globally
+              const lastMode = state.get('job_mode', 'sandbox');
+              modeSel.value = lastMode;
+              modeSel.onchange = () => state.set('job_mode', modeSel.value);
+
+              // If job is already running, show badge instead of selector
+              if (j.status === 'running') {
+                tr.children[4].innerHTML = modeBadge;
+              } else {
+                tr.children[4].appendChild(modeSel);
+              }
+
               const btn = document.createElement('button');
               btn.className = j.status === 'running' ? 'danger' : 'success';
               btn.textContent = j.status === 'running' ? '⏹ Stop' : '▶ Start';
+              if (j.status !== 'running' && !tokenSet) {
+                btn.disabled = true;
+                btn.style.opacity = '0.5';
+                btn.style.cursor = 'not-allowed';
+                btn.title = 'Set API Token first';
+                modeSel.disabled = true;
+                modeSel.style.opacity = '0.6';
+              }
               btn.onclick = async () => {
                 if (j.status === 'running') {
-                  await jpost('/api/jobs/stop', { job_id: j.job_id });
+                  const res = await jpost('/api/jobs/stop', { job_id: j.job_id });
+                  if (res && res.ok === false) alert(res.error || 'Failed to stop job');
                 } else {
-                  await jpost('/api/jobs/start', { job_id: j.job_id });
+                  if (!tokenSet) {
+                    alert('Set API Token first (Credentials card).');
+                    return;
+                  }
+                  const mode = modeSel.value || state.get('job_mode', 'sandbox');
+                  if (mode === 'real') {
+                    const ok = window.confirm('REAL trading mode selected. This will place real orders. Continue?');
+                    if (!ok) return;
+                  }
+                  const res = await jpost('/api/jobs/start', { job_id: j.job_id, sandbox: mode === 'sandbox', confirm: mode === 'real' });
+                  if (res && res.ok === false) {
+                    alert(res.error || 'Failed to start job');
+                    return;
+                  }
                 }
                 await refresh();
               };
-              tr.children[4].appendChild(btn);
+              tr.children[5].appendChild(btn);
               tb.appendChild(tr);
             }
           }
@@ -713,6 +772,7 @@ class UiServer:
         self._cached_account_id: Optional[str] = None
         self._token_set: bool = broker_client.credentials_set()
         self._jobs: dict[str, asyncio.Task] = {}
+        self._job_modes: dict[str, bool] = {}  # job_id -> sandbox bool
 
         # Build job registry from config (manual start).
         # key: figi|strategy
@@ -762,6 +822,7 @@ class UiServer:
                 "now": datetime.now(timezone.utc).isoformat(),
                 "trading_enabled": trading_enabled,
                 "token_set": broker_client.credentials_set(),
+                "broker_mode": broker_client.current_mode(),
                 "kill_switch_active": self._kill_switch_active(),
             }
         )
@@ -774,7 +835,8 @@ class UiServer:
             return _json_response({"ok": False, "error": "token is required"}, status=400)
 
         # Update runtime credentials (memory only).
-        await broker_client.set_credentials(token=token, sandbox=settings.sandbox)
+        # Initialize in SANDBOX mode by default for safety; job start can switch mode.
+        await broker_client.set_credentials(token=token, sandbox=True)
         await broker_client.ainit()
         settings.token = token
         if account_id:
@@ -788,12 +850,17 @@ class UiServer:
             t = self._jobs.get(jid)
             status = "running" if (t is not None and not t.done()) else "stopped"
             figi, strat = meta["figi"], meta["strategy"].value
-            items.append({"job_id": jid, "figi": figi, "strategy": strat, "status": status})
+            mode = None
+            if status == "running":
+                mode = "sandbox" if self._job_modes.get(jid, True) else "real"
+            items.append({"job_id": jid, "figi": figi, "strategy": strat, "status": status, "mode": mode})
         return _json_response({"items": items})
 
     async def handle_job_start(self, request: web.Request) -> web.Response:
         body = await request.json()
         jid = body.get("job_id")
+        sandbox = bool(body.get("sandbox", True))
+        confirm = bool(body.get("confirm", False))
         if jid not in self._job_defs:
             return _json_response({"ok": False, "error": "unknown job_id"}, status=404)
         if not broker_client.credentials_set():
@@ -801,6 +868,37 @@ class UiServer:
         t = self._jobs.get(jid)
         if t is not None and not t.done():
             return _json_response({"ok": True, "status": "already_running"})
+
+        # Safety: do not allow real trading unless explicitly enabled in env + confirmed in UI.
+        if not sandbox:
+            if not settings.i_know_what_i_am_doing:
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "real trading is locked. Set I_KNOW_WHAT_I_AM_DOING=true in env to enable real mode.",
+                    },
+                    status=403,
+                )
+            if not confirm:
+                return _json_response({"ok": False, "error": "confirmation required for real mode"}, status=400)
+
+        # Disallow mixing sandbox/real jobs in one process (shared broker client).
+        for running_jid, task in self._jobs.items():
+            if task is not None and not task.done():
+                running_mode = self._job_modes.get(running_jid, True)
+                if running_mode != sandbox:
+                    return _json_response(
+                        {
+                            "ok": False,
+                            "error": "cannot run sandbox and real jobs одновременно в одном процессе",
+                        },
+                        status=409,
+                    )
+
+        # Switch broker client mode for this job.
+        # (token is already stored inside broker_client from /api/credentials)
+        await broker_client.set_credentials(token=settings.token or "", sandbox=sandbox)
+        await broker_client.ainit()
 
         meta = self._job_defs[jid]
         figi = meta["figi"]
@@ -827,6 +925,7 @@ class UiServer:
             await strategy.start()
 
         self._jobs[jid] = asyncio.create_task(_run_job())
+        self._job_modes[jid] = sandbox
         return _json_response({"ok": True, "status": "started"})
 
     async def handle_job_stop(self, request: web.Request) -> web.Response:
