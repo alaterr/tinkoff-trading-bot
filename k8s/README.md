@@ -16,6 +16,16 @@ docker push "$IMG"
 kubectl apply -k k8s/overlays/sandbox
 ```
 
+### Open UI
+
+UI runs on port 8000 in the pod and is exposed via `Service/tinkoff-bot-ui`.
+
+```bash
+kubectl -n tinkoff-bot port-forward svc/tinkoff-bot-ui 8080:80
+```
+
+Then open `http://localhost:8080/`.
+
 ### Configure secrets
 
 Edit secret values (TOKEN/ACCOUNT_ID) before applying:

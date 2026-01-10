@@ -58,9 +58,18 @@ class GlobalExecutionConfig(BaseModel):
     trade_only_market_hours: bool = True
     timezone: str = "Europe/Moscow"
     price_slippage_bps: float = 0.0
+    commission_bps: float = 0.0
 
     @validator("price_slippage_bps")
     def _slippage_bps(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("must be >= 0")
+        if v > 500:
+            raise ValueError("too large (bps), sanity check failed")
+        return v
+
+    @validator("commission_bps")
+    def _commission_bps(cls, v: float) -> float:
         if v < 0:
             raise ValueError("must be >= 0")
         if v > 500:

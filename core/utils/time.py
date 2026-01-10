@@ -26,6 +26,22 @@ def floor_to_day_close(dt: datetime, tz: ZoneInfo) -> datetime:
     return datetime.combine(d, time(23, 59, 59), tzinfo=tz)
 
 
+def start_of_day(dt: datetime, tz: ZoneInfo) -> datetime:
+    dt_local = ensure_tzaware(dt, tz)
+    d: date = dt_local.date()
+    return datetime.combine(d, time(0, 0, 0), tzinfo=tz)
+
+
+def start_of_week(dt: datetime, tz: ZoneInfo) -> datetime:
+    """
+    Monday 00:00:00 local time.
+    """
+    dt_local = ensure_tzaware(dt, tz)
+    d = dt_local.date()
+    monday = d - timedelta(days=d.weekday())
+    return datetime.combine(monday, time(0, 0, 0), tzinfo=tz)
+
+
 def iter_days(start: date, end: date) -> list[date]:
     if end < start:
         return []

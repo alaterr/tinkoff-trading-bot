@@ -1,12 +1,15 @@
 from typing import Dict
 
 from app.strategies.interval.IntervalStrategy import IntervalStrategy
+from app.strategies.positional.d1_runner import D1PositionalStrategyRunner
 from app.strategies.base import BaseStrategy
 from app.strategies.errors import UnsupportedStrategyError
 from app.strategies.models import StrategyName
 
 strategies: Dict[StrategyName, BaseStrategy.__class__] = {
     StrategyName.INTERVAL: IntervalStrategy,
+    StrategyName.DONCHIAN_ATR: D1PositionalStrategyRunner,
+    StrategyName.EMA_ATR: D1PositionalStrategyRunner,
 }
 
 

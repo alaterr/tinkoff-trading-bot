@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -103,7 +102,63 @@ class StateStore:
             )
             """
         )
+
+        # Risk accounting / run control
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                strategy_name TEXT NOT NULL,
+                figi TEXT NOT NULL,
+                client_order_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                UNIQUE(event_type, client_order_id)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS equity_baselines (
+                period_key TEXT PRIMARY KEY,
+                ts TEXT NOT NULL,
+                equity_rub TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cooldown (
+                key TEXT PRIMARY KEY,
+                cooldown_until_ts TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS control_flags (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
+
+    def list_open_orders(self) -> list[str]:
+        """
+        Return client_order_id for orders that are not in a terminal status.
+        Status values are broker-specific strings; we treat anything containing
+        'FILL', 'CANCEL', 'REJECT' as terminal (best-effort).
+        """
+        assert self._conn is not None
+        rows = self._conn.execute("SELECT client_order_id, status FROM orders").fetchall()
+        out: list[str] = []
+        for oid, st in rows:
+            s = (st or "").upper()
+            if ("FILL" in s) or ("CANCEL" in s) or ("REJECT" in s):
+                continue
+            out.append(str(oid))
+        return out
 
     def upsert_order(self, order: Order, *, extra: Optional[dict[str, Any]] = None) -> None:
         assert self._conn is not None
@@ -131,6 +186,98 @@ class StateStore:
                 order.status,
                 extra_json,
             ),
+        )
+        self._conn.commit()
+
+    def add_trade_event(
+        self,
+        *,
+        ts: datetime,
+        strategy_name: str,
+        figi: str,
+        client_order_id: str,
+        event_type: str = "order_sent",
+    ) -> None:
+        assert self._conn is not None
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO trade_events (ts, strategy_name, figi, client_order_id, event_type)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (_dt_to_str(ts), strategy_name, figi, client_order_id, event_type),
+        )
+        self._conn.commit()
+
+    def count_trade_events_since(self, *, since_ts: datetime, event_type: str = "order_sent") -> int:
+        assert self._conn is not None
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) FROM trade_events
+            WHERE event_type=? AND ts>=?
+            """,
+            (event_type, _dt_to_str(since_ts)),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def get_or_set_equity_baseline(self, *, period_key: str, ts: datetime, equity_rub) -> str:
+        """
+        Returns baseline equity for the period. If not present, sets it to provided equity.
+        Stored as string to avoid float drift.
+        """
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT equity_rub FROM equity_baselines WHERE period_key=?",
+            (period_key,),
+        ).fetchone()
+        if row is not None:
+            return str(row[0])
+
+        self._conn.execute(
+            "INSERT INTO equity_baselines(period_key, ts, equity_rub) VALUES (?, ?, ?)",
+            (period_key, _dt_to_str(ts), str(equity_rub)),
+        )
+        self._conn.commit()
+        return str(equity_rub)
+
+    def get_cooldown_until(self, *, key: str = "global") -> Optional[datetime]:
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT cooldown_until_ts FROM cooldown WHERE key=?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _str_to_dt(row[0])
+
+    def set_cooldown_until(self, *, key: str = "global", cooldown_until: datetime) -> None:
+        assert self._conn is not None
+        self._conn.execute(
+            """
+            INSERT INTO cooldown(key, cooldown_until_ts) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET cooldown_until_ts=excluded.cooldown_until_ts
+            """,
+            (key, _dt_to_str(cooldown_until)),
+        )
+        self._conn.commit()
+
+    def get_flag(self, *, key: str, default: str) -> str:
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT value FROM control_flags WHERE key=?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return default
+        return str(row[0])
+
+    def set_flag(self, *, key: str, value: str) -> None:
+        assert self._conn is not None
+        self._conn.execute(
+            """
+            INSERT INTO control_flags(key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (key, value),
         )
         self._conn.commit()
 

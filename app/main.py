@@ -1,10 +1,12 @@
 import asyncio
 import logging
+import os
 
 from app.client import client
 from app.instruments_config.parser import instruments_config
 from app.settings import settings
 from app.strategies.strategy_fabric import resolve_strategy
+from app.ui.server import start_ui_server
 
 logging.basicConfig(
     level=settings.log_level,
@@ -21,11 +23,28 @@ async def run():
             "Set I_KNOW_WHAT_I_AM_DOING=true to acknowledge real trading mode."
         )
     await client.ainit()
+
+    # Optional UI server (no auth). Enable via UI_ENABLED=true.
+    ui_enabled = os.getenv("UI_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    if ui_enabled:
+        from storage.state_store import StateStore
+
+        store = StateStore(db_path=os.getenv("STATE_DB_PATH", "state.db"))
+        store.connect()
+        host = os.getenv("UI_HOST", "0.0.0.0")
+        port = int(os.getenv("UI_PORT", "8000"))
+        await start_ui_server(store=store, host=host, port=port)
+
     spawned_tasks = []
     for instrument_config in instruments_config.instruments:
         strategy = resolve_strategy(
             strategy_name=instrument_config.strategy.name,
             figi=instrument_config.figi,
+            instrument_config=instrument_config,
+            global_risk=instruments_config.global_risk,
+            global_execution=instruments_config.global_execution,
+            strategy_name=instrument_config.strategy.name.value,
+            strategy_params=instrument_config.strategy.parameters,
             **instrument_config.strategy.parameters
         )
         spawned_tasks.append(asyncio.create_task(strategy.start()))

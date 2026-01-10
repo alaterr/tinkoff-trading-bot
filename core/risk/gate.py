@@ -47,11 +47,39 @@ class RiskGate:
         instrument: InstrumentConfig,
         current_position_qty: int,
         open_positions_total: int,
+        trades_today: Optional[int] = None,
+        trades_week: Optional[int] = None,
+        daily_loss_rub: Optional[Decimal] = None,
+        weekly_loss_rub: Optional[Decimal] = None,
         equity_rub: Optional[Decimal] = None,
         now_ts: Optional[datetime] = None,
     ) -> RiskDecision:
         if _file_exists(self._kill_switch):
             return RiskDecision(allowed=False, reason=f"kill-switch file present: {self._kill_switch}")
+
+        if trades_today is not None and trades_today >= self._global.max_trades_per_day:
+            return RiskDecision(
+                allowed=False,
+                reason=f"max_trades_per_day reached ({self._global.max_trades_per_day})",
+            )
+        if trades_week is not None and trades_week >= self._global.max_trades_per_week:
+            return RiskDecision(
+                allowed=False,
+                reason=f"max_trades_per_week reached ({self._global.max_trades_per_week})",
+            )
+
+        if self._global.max_daily_loss_rub > 0 and daily_loss_rub is not None:
+            if daily_loss_rub >= Decimal(str(self._global.max_daily_loss_rub)):
+                return RiskDecision(
+                    allowed=False,
+                    reason=f"max_daily_loss_rub reached ({self._global.max_daily_loss_rub})",
+                )
+        if self._global.max_weekly_loss_rub > 0 and weekly_loss_rub is not None:
+            if weekly_loss_rub >= Decimal(str(self._global.max_weekly_loss_rub)):
+                return RiskDecision(
+                    allowed=False,
+                    reason=f"max_weekly_loss_rub reached ({self._global.max_weekly_loss_rub})",
+                )
 
         if open_positions_total >= self._global.max_positions_total and current_position_qty == 0:
             return RiskDecision(

@@ -19,6 +19,9 @@ spec:
         - name: bot
           image: ghcr.io/YOUR_ORG/tinkoff-trading-bot:latest
           imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
           envFrom:
             - configMapRef:
                 name: tinkoff-bot-config
@@ -28,6 +31,12 @@ spec:
             # Ensure config is read from /data (mounted PVC + configmap file)
             - name: PYTHONPATH
               value: "/app"
+            - name: UI_ENABLED
+              value: "true"
+            - name: UI_HOST
+              value: "0.0.0.0"
+            - name: UI_PORT
+              value: "8000"
           volumeMounts:
             - name: data
               mountPath: /data
