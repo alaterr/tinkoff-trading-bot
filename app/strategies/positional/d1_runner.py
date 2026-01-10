@@ -23,10 +23,20 @@ from core.risk.gate import RiskGate
 from core.utils.time import moscow_tz, start_of_day, start_of_week
 from storage.state_store import StateStore
 
-# Ensure strategies package is accessible (PYTHONPATH=/app should work, but add fallback)
-_strategies_path = Path(__file__).parent.parent.parent / "strategies"
-if _strategies_path.exists() and str(_strategies_path.parent) not in sys.path:
-    sys.path.insert(0, str(_strategies_path.parent))
+# Ensure strategies package is accessible
+# This file is at: app/strategies/positional/d1_runner.py
+# strategies package is at: strategies/ (root level)
+# So we need to go up 4 levels: positional -> strategies -> app -> root
+_current_file = Path(__file__).resolve()
+_project_root = _current_file.parent.parent.parent.parent  # app/strategies/positional -> app/strategies -> app -> root
+_strategies_dir = _project_root / "strategies"
+
+# Add project root to sys.path if strategies exists there and root is not already in path
+# This works both locally (PYTHONPATH=./) and in Docker (PYTHONPATH=/app)
+if _strategies_dir.exists() and _strategies_dir.is_dir():
+    _root_str = str(_project_root)
+    if _root_str not in sys.path:
+        sys.path.insert(0, _root_str)
 
 from strategies.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
 from strategies.ema_atr import EmaAtrTrendStrategy, EmaAtrConfig
