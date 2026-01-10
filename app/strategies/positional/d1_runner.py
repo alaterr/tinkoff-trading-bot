@@ -474,6 +474,7 @@ class D1PositionalStrategyRunner(BaseStrategy):
                     daily_loss_rub=daily_loss,
                     weekly_loss_rub=weekly_loss,
                     equity_rub=equity,
+                    # For D1 strategies, keep using global risk_per_trade_pct (no override)
                 )
                 if not decision.allowed or decision.intent is None:
                     # Transparency: record block reason

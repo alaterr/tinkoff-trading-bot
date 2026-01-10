@@ -93,6 +93,53 @@ class RolloverConfig(BaseModel):
         return v
 
 
+class InstrumentRiskOverrideConfig(BaseModel):
+    """
+    Optional per-instrument risk overrides.
+    Can be provided as `instrument.risk` in instruments_config.json (backward-compatible).
+    """
+
+    # Qty caps (aliases for top-level InstrumentConfig fields)
+    max_position_qty: Optional[int] = None
+    max_order_qty: Optional[int] = None
+
+    # Risk limits
+    max_trades_per_day: Optional[int] = None
+    max_trades_per_week: Optional[int] = None
+    max_daily_loss_rub: Optional[float] = None
+    max_weekly_loss_rub: Optional[float] = None
+
+    # Optional per-instrument risk fraction override (0..1 or percent-like)
+    risk_per_trade_pct: Optional[float] = None
+
+    @validator("max_position_qty", "max_order_qty", "max_trades_per_day", "max_trades_per_week")
+    def _pos_ints(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return v
+        if v <= 0:
+            raise ValueError("must be > 0")
+        return v
+
+    @validator("max_daily_loss_rub", "max_weekly_loss_rub")
+    def _non_negative_money_opt(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return v
+        if v < 0:
+            raise ValueError("must be >= 0")
+        return v
+
+    @validator("risk_per_trade_pct")
+    def _risk_pct_opt(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return v
+        # allow percent-like; clamp sanity only
+        if v <= 0:
+            raise ValueError("must be > 0")
+        if v > 100:
+            raise ValueError("too large, sanity check failed")
+        return v
+
+
 class InstrumentConfig(BaseModel):
     figi: str
     strategy: StrategyConfig
@@ -102,6 +149,8 @@ class InstrumentConfig(BaseModel):
     allow_margin: Optional[bool] = None
     max_position_qty: Optional[int] = None
     max_order_qty: Optional[int] = None
+    # Optional per-instrument overrides (e.g. {"risk": {"max_trades_per_day": 3, ...}})
+    risk: Optional[InstrumentRiskOverrideConfig] = None
     rollover: RolloverConfig = Field(default_factory=RolloverConfig)
 
     @validator("max_position_qty", "max_order_qty")
@@ -118,6 +167,13 @@ class InstrumentConfig(BaseModel):
         allow_short = values.get("allow_short")
         allow_margin = values.get("allow_margin")
         rollover: RolloverConfig = values.get("rollover") or RolloverConfig()
+        risk: InstrumentRiskOverrideConfig = values.get("risk") or InstrumentRiskOverrideConfig()
+
+        # Apply risk aliases to top-level qty limits if provided in instrument.risk
+        if values.get("max_position_qty") is None and risk.max_position_qty is not None:
+            values["max_position_qty"] = risk.max_position_qty
+        if values.get("max_order_qty") is None and risk.max_order_qty is not None:
+            values["max_order_qty"] = risk.max_order_qty
 
         if instrument_type == "futures":
             # Defaults per requirements

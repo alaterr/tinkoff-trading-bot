@@ -16,11 +16,18 @@ from reports.stats import EquityPoint, Trade
 class TrendBreakoutParams:
     timeframe: str  # "1h" | "4h" (informational in backtest; candles passed already match)
     breakout_lookback: int
-    trend_lookback: int
+    exit_lookback: int
+    trend_ema_fast: int
+    trend_ema_slow: int
     atr_period: int
     atr_stop_mult: Decimal
     atr_tp_mult: Decimal
-    risk_per_trade_pct: Decimal  # can be "0.5" meaning 0.5%
+    atr_trail_mult: Decimal
+    risk_per_trade_pct: Decimal  # can be 0.5 meaning 0.5%
+    volume_window: int = 20
+    min_volume_ratio: Decimal = Decimal("1.0")
+    trade_sessions: tuple[tuple[str, str], ...] = (("10:00", "18:45"),)  # MSK
+    exit_before_close_minutes: int = 0
 
 
 def _to_dt(s: str) -> datetime:
@@ -33,7 +40,82 @@ def _to_dt(s: str) -> datetime:
 
 
 def _norm_risk_pct(v: Decimal) -> Decimal:
-    return v / Decimal("100") if v > 1 else v
+    return v / Decimal("100") if v >= Decimal("0.1") else v
+
+
+def _trend_dir_for_ts_v2(
+    *,
+    d1_ts: List[datetime],
+    d1_closes: List[Decimal],
+    ema_fast: List[Decimal],
+    ema_slow: List[Decimal],
+    ts: datetime,
+) -> int:
+    """
+    Map intraday ts to last available D1 EMA filter:
+    bull if close>ema_slow and ema_fast>ema_slow, bear if close<ema_slow and ema_fast<ema_slow.
+    """
+    if len(ema_fast) == 0 or len(ema_slow) == 0:
+        return 0
+    idx = None
+    for i in range(len(d1_ts)):
+        if d1_ts[i] <= ts:
+            idx = i
+        else:
+            break
+    if idx is None or idx >= len(d1_closes) or idx >= len(ema_fast) or idx >= len(ema_slow):
+        return 0
+    c = d1_closes[idx]
+    ef = ema_fast[idx]
+    es = ema_slow[idx]
+    if c > es and ef > es:
+        return 1
+    if c < es and ef < es:
+        return -1
+    return 0
+
+
+def _in_trade_session(ts: datetime, sessions: tuple[tuple[str, str], ...]) -> bool:
+    try:
+        from zoneinfo import ZoneInfo
+
+        msk = ZoneInfo("Europe/Moscow")
+        t = ts.astimezone(msk).time()
+    except Exception:
+        t = ts.time()
+    for a, b in sessions:
+        try:
+            sh, sm = a.split(":")
+            eh, em = b.split(":")
+            start_t = datetime(2000, 1, 1, int(sh), int(sm)).time()
+            end_t = datetime(2000, 1, 1, int(eh), int(em)).time()
+        except Exception:
+            continue
+        if start_t <= t <= end_t:
+            return True
+    return False
+
+
+def _minutes_to_session_end(ts: datetime, sessions: tuple[tuple[str, str], ...]) -> Optional[int]:
+    try:
+        from zoneinfo import ZoneInfo
+
+        msk = ZoneInfo("Europe/Moscow")
+        local = ts.astimezone(msk)
+    except Exception:
+        return None
+    t = local.time()
+    for a, b in sessions:
+        try:
+            eh, em = b.split(":")
+            end_dt = datetime(local.year, local.month, local.day, int(eh), int(em), tzinfo=local.tzinfo)
+            sh, sm = a.split(":")
+            start_dt = datetime(local.year, local.month, local.day, int(sh), int(sm), tzinfo=local.tzinfo)
+        except Exception:
+            continue
+        if start_dt.time() <= t <= end_dt.time():
+            return int((end_dt - local).total_seconds() // 60)
+    return None
 
 
 def _trend_dir_for_ts(*, d1_ts: List[datetime], ema_vals: List[Decimal], ts: datetime) -> int:
@@ -76,10 +158,11 @@ def run_backtest_trend_breakout_atr(
     if not candles_tf:
         return [], []
 
-    # Precompute daily EMA (aligned to D1 candle timestamps)
+    # Precompute daily EMA fast/slow (aligned to D1 candle timestamps)
     d1_closes = [c.close for c in candles_d1]
     d1_ts = [c.time for c in candles_d1]
-    d1_ema = ema(d1_closes, params.trend_lookback) if d1_closes else []
+    d1_ema_fast = ema(d1_closes, params.trend_ema_fast) if d1_closes else []
+    d1_ema_slow = ema(d1_closes, params.trend_ema_slow) if d1_closes else []
 
     cash = cfg.initial_equity
     pos = 0
@@ -87,6 +170,8 @@ def run_backtest_trend_breakout_atr(
     entry: Optional[Decimal] = None
     stop: Optional[Decimal] = None
     tp: Optional[Decimal] = None
+    peak: Optional[Decimal] = None
+    trough: Optional[Decimal] = None
 
     trades: List[Trade] = []
     equity: List[EquityPoint] = []
@@ -97,6 +182,7 @@ def run_backtest_trend_breakout_atr(
     for i in range(len(candles_tf)):
         window = candles_tf[: i + 1]
         c = candles_tf[i]
+        a = atr(window, params.atr_period)
 
         # update mark-to-market first (for sizing)
         mtm = futures_equity(cash=cash, pos=pos, avg_price=avg_price, price=c.close, price_multiplier=pm)
@@ -105,6 +191,24 @@ def run_backtest_trend_breakout_atr(
         if pos != 0 and entry is not None:
             exit_now = False
             exit_reason = ""
+
+            # Trailing stop update
+            if params.atr_trail_mult > 0 and a is not None and a > 0:
+                if pos > 0:
+                    peak = c.close if peak is None else max(peak, c.close)
+                    trail = peak - (params.atr_trail_mult * a)
+                    stop0 = entry - (params.atr_stop_mult * a)
+                    stop = max(stop0, trail) if stop is not None else max(stop0, trail)
+                else:
+                    trough = c.close if trough is None else min(trough, c.close)
+                    trail = trough + (params.atr_trail_mult * a)
+                    stop0 = entry + (params.atr_stop_mult * a)
+                    stop = min(stop0, trail) if stop is not None else min(stop0, trail)
+
+            # Exit before session end
+            mins_to_end = _minutes_to_session_end(c.time, params.trade_sessions)
+            if params.exit_before_close_minutes > 0 and mins_to_end is not None and mins_to_end <= params.exit_before_close_minutes:
+                exit_now, exit_reason = True, "SESSION_END"
             if pos > 0:
                 if stop is not None and c.close <= stop:
                     exit_now, exit_reason = True, "SL"
@@ -144,6 +248,7 @@ def run_backtest_trend_breakout_atr(
                     )
                 )
                 entry = stop = tp = None
+                peak = trough = None
                 mtm = futures_equity(cash=cash, pos=pos, avg_price=avg_price, price=c.close, price_multiplier=pm)
 
         # Indicator values
@@ -154,12 +259,83 @@ def run_backtest_trend_breakout_atr(
         prev = window[:-1]
         upper = donchian_high(prev, params.breakout_lookback)
         lower = donchian_low(prev, params.breakout_lookback)
-        a = atr(window, params.atr_period)
 
-        trend_dir = _trend_dir_for_ts(d1_ts=d1_ts, ema_vals=d1_ema, ts=c.time)
+        trend_dir = _trend_dir_for_ts_v2(
+            d1_ts=d1_ts,
+            d1_closes=d1_closes,
+            ema_fast=d1_ema_fast,
+            ema_slow=d1_ema_slow,
+            ts=c.time,
+        )
         target = pos
 
-        if upper is not None and lower is not None and a is not None and trend_dir != 0:
+        exit_high = donchian_high(prev, params.exit_lookback) if params.exit_lookback > 0 else None
+        exit_low = donchian_low(prev, params.exit_lookback) if params.exit_lookback > 0 else None
+
+        # Channel exit
+        if pos > 0 and exit_low is not None and c.close < exit_low:
+            target = 0
+        elif pos < 0 and exit_high is not None and c.close > exit_high:
+            target = 0
+
+        # Entry (flat only)
+        if (
+            pos == 0
+            and upper is not None
+            and lower is not None
+            and a is not None
+            and trend_dir != 0
+            and _in_trade_session(c.time, params.trade_sessions)
+        ):
+            # Volume filter
+            if params.min_volume_ratio > 0 and params.volume_window > 0 and len(prev) >= params.volume_window:
+                vw = prev[-params.volume_window :]
+                avg_v = sum(int(x.volume) for x in vw) / float(len(vw)) if vw else 0.0
+                if avg_v > 0:
+                    vr = Decimal(str(int(c.volume) / avg_v))
+                    if vr < params.min_volume_ratio:
+                        pass
+                    else:
+                        # Size
+                        if risk_frac > 0 and a > 0 and params.atr_stop_mult > 0:
+                            risk_budget = mtm * risk_frac
+                            per_contract_risk = (a * params.atr_stop_mult) * pm
+                            qty = (
+                                int((risk_budget / per_contract_risk).to_integral_value(rounding="ROUND_FLOOR"))
+                                if per_contract_risk > 0
+                                else 0
+                            )
+                            if qty <= 0:
+                                qty = 1
+                        else:
+                            qty = 1
+
+                        if c.close > upper and trend_dir > 0:
+                            target = qty
+                        elif c.close < lower and trend_dir < 0:
+                            target = -qty
+                else:
+                    pass
+            else:
+                # If volume filter disabled or insufficient history, we allow entries only if disabled.
+                if params.min_volume_ratio <= 0:
+                    # Size
+                    if risk_frac > 0 and a > 0 and params.atr_stop_mult > 0:
+                        risk_budget = mtm * risk_frac
+                        per_contract_risk = (a * params.atr_stop_mult) * pm
+                        qty = (
+                            int((risk_budget / per_contract_risk).to_integral_value(rounding="ROUND_FLOOR"))
+                            if per_contract_risk > 0
+                            else 0
+                        )
+                        if qty <= 0:
+                            qty = 1
+                    else:
+                        qty = 1
+                    if c.close > upper and trend_dir > 0:
+                        target = qty
+                    elif c.close < lower and trend_dir < 0:
+                        target = -qty
             # Size
             if risk_frac > 0 and a > 0 and params.atr_stop_mult > 0:
                 risk_budget = mtm * risk_frac
@@ -245,11 +421,16 @@ def run_backtest_trend_breakout_atr(
                 if pos > 0:
                     stop = entry - (params.atr_stop_mult * a)
                     tp = entry + (params.atr_tp_mult * a)
+                    peak = entry
+                    trough = None
                 else:
                     stop = entry + (params.atr_stop_mult * a)
                     tp = entry - (params.atr_tp_mult * a)
+                    trough = entry
+                    peak = None
             else:
                 entry = stop = tp = None
+                peak = trough = None
 
         mtm = futures_equity(cash=cash, pos=pos, avg_price=avg_price, price=c.close, price_multiplier=pm)
         equity.append(EquityPoint(ts=c.time.isoformat(), equity=mtm))

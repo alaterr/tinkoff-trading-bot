@@ -1182,7 +1182,7 @@ INDEX_HTML = """<!doctype html>
           return {"ema_fast":20,"ema_slow":50,"atr_period":14,"atr_stop_mult":"3","cooldown_days":5,"base_target_qty":1};
         }
         if (strategy === 'trend_breakout_atr') {
-          return {"timeframe":"1h","breakout_lookback":20,"trend_lookback":50,"atr_period":14,"atr_stop_mult":"2","atr_tp_mult":"3","risk_per_trade_pct":"0.5","exit_before_close_minutes":0};
+          return {"timeframe":"1h","breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"2.0","atr_tp_mult":"3.0","atr_trail_mult":"1.5","trend_ema_fast":20,"trend_ema_slow":50,"risk_per_trade_pct":0.5,"volume_window":20,"min_volume_ratio":"1.2","trade_sessions":[["10:00","18:45"]],"exit_before_close_minutes":30,"days_before_expiry_to_roll":5};
         }
         // donchian_atr
         return {"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1};
@@ -1218,36 +1218,40 @@ INDEX_HTML = """<!doctype html>
         }
         if (strategy === 'trend_breakout_atr') {
           return [
-            'Trend Breakout + Donchian + ATR (1h/4h + фильтр тренда D1)',
+            'Trend Breakout + Donchian + ATR (1h/4h + D1 EMA fast/slow + объём/сессии + трейлинг)',
             '',
-            'Идея: торговать пробои канала Дончиана на 1H/4H, но входить только по направлению долгосрочного тренда.',
-            'Тренд определяется по дневной EMA(trend_lookback): если EMA растёт (EMA[t] > EMA[t-1]) — разрешены только лонги; если падает — только шорты.',
+            'Идея: торговать пробои канала Дончиана на 1H/4H, но входить только по направлению долгосрочного тренда (D1).',
+            'Тренд: EMA_fast и EMA_slow на D1. Лонг только если Close(D1) > EMA_slow и EMA_fast > EMA_slow; шорт — зеркально.',
             '',
             'Данные:',
             '- Базовый ТФ: 1h или 4h (4h агрегируется из 1h свечей).',
-            '- Тренд: дневные свечи (D1) для EMA.',
+            '- Тренд: дневные свечи (D1) для EMA fast/slow.',
             '',
             'Вход:',
-            '- Лонг: Close > DonchianUpper(breakout_lookback) И тренд вверх.',
-            '- Шорт: Close < DonchianLower(breakout_lookback) И тренд вниз.',
+            '- Лонг: Close > DonchianUpper(breakout_lookback), тренд вверх, фильтр по объёму и торговым часам.',
+            '- Шорт: Close < DonchianLower(breakout_lookback), тренд вниз, фильтр по объёму и торговым часам.',
             '',
             'Размер позиции:',
-            '- Рассчитывается от риска на сделку: risk_per_trade_pct × equity / (ATR × atr_stop_mult).',
-            '  Примечание: это best-effort оценка без учёта мультипликатора контракта/лотности, поэтому для реальной торговли обязательно выставляй max_position_qty/max_order_qty.',
+            '- Риск на сделку: risk_per_trade_pct% от equity.',
+            '- Кол-во ≈ risk_budget / (ATR × atr_stop_mult × price_multiplier × lot). (price_multiplier берётся из спецификации фьючерса, best-effort)',
             '',
             'Выход:',
+            '- Канал выхода (exit_lookback): выход при пробое противоположной границы.',
             '- Стоп-лосс/тейк-профит по ATR (контроль по закрытию свечи):',
             '  SL = entry ± atr_stop_mult × ATR, TP = entry ± atr_tp_mult × ATR.',
-            '- Переворот по противоположному пробою + смена тренда.',
+            '- Трейлинг-стоп по ATR: стоп подтягивается за ценой на atr_trail_mult × ATR.',
+            '- За N минут до конца сессии (exit_before_close_minutes) — выход в 0.',
             '',
             'Параметры:',
             '- timeframe: "1h" или "4h"',
-            '- breakout_lookback: окно Дончиана',
-            '- trend_lookback: период EMA на дневках',
+            '- breakout_lookback: окно Дончиана для входа',
+            '- exit_lookback: окно Дончиана для выхода',
+            '- trend_ema_fast / trend_ema_slow: EMA на дневках для фильтра тренда',
             '- atr_period: период ATR',
-            '- atr_stop_mult / atr_tp_mult: множители SL/TP',
-            '- risk_per_trade_pct: риск на сделку (в процентах, например "0.5" = 0.5%)',
-            '- exit_before_close_minutes: резерв под ручной выход перед сессией (пока не реализован для MOEX сессий)',
+            '- atr_stop_mult / atr_tp_mult / atr_trail_mult: множители SL/TP/трейлинга',
+            '- volume_window / min_volume_ratio: фильтр объёма',
+            '- trade_sessions: торговые окна (MSK), например [["10:00","18:45"]]',
+            '- exit_before_close_minutes: выйти за N минут до конца сессии',
           ].join('\\n');
         }
         // donchian_atr
@@ -1807,11 +1811,18 @@ class UiServer:
             p = TrendBreakoutParams(
                 timeframe=tf,
                 breakout_lookback=int(params.get("breakout_lookback", 20)),
-                trend_lookback=int(params.get("trend_lookback", 50)),
+                exit_lookback=int(params.get("exit_lookback", 10)),
+                trend_ema_fast=int(params.get("trend_ema_fast", 20)),
+                trend_ema_slow=int(params.get("trend_ema_slow", 50)),
                 atr_period=int(params.get("atr_period", 14)),
                 atr_stop_mult=Decimal(str(params.get("atr_stop_mult", "2"))),
                 atr_tp_mult=Decimal(str(params.get("atr_tp_mult", "3"))),
+                atr_trail_mult=Decimal(str(params.get("atr_trail_mult", "1.5"))),
                 risk_per_trade_pct=Decimal(str(params.get("risk_per_trade_pct", "0.5"))),
+                volume_window=int(params.get("volume_window", 20)),
+                min_volume_ratio=Decimal(str(params.get("min_volume_ratio", "1.0"))),
+                trade_sessions=tuple(tuple(x) for x in (params.get("trade_sessions") or (("10:00","18:45"),))),
+                exit_before_close_minutes=int(params.get("exit_before_close_minutes", 0)),
             )
             # Limits: for UI jobs use stored meta values; for config jobs fall back to instrument_config.
             inst_cfg = meta.get("instrument_config")

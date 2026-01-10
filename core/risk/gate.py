@@ -52,33 +52,56 @@ class RiskGate:
         daily_loss_rub: Optional[Decimal] = None,
         weekly_loss_rub: Optional[Decimal] = None,
         equity_rub: Optional[Decimal] = None,
+        risk_per_trade_pct_override: Optional[Decimal] = None,
         now_ts: Optional[datetime] = None,
     ) -> RiskDecision:
         if _file_exists(self._kill_switch):
             return RiskDecision(allowed=False, reason=f"kill-switch file present: {self._kill_switch}")
 
-        if trades_today is not None and trades_today >= self._global.max_trades_per_day:
+        inst_risk = getattr(instrument, "risk", None)
+        max_trades_per_day = (
+            int(getattr(inst_risk, "max_trades_per_day", None))
+            if getattr(inst_risk, "max_trades_per_day", None) is not None
+            else int(self._global.max_trades_per_day)
+        )
+        max_trades_per_week = (
+            int(getattr(inst_risk, "max_trades_per_week", None))
+            if getattr(inst_risk, "max_trades_per_week", None) is not None
+            else int(self._global.max_trades_per_week)
+        )
+        max_daily_loss_rub = (
+            Decimal(str(getattr(inst_risk, "max_daily_loss_rub", None)))
+            if getattr(inst_risk, "max_daily_loss_rub", None) is not None
+            else Decimal(str(self._global.max_daily_loss_rub))
+        )
+        max_weekly_loss_rub = (
+            Decimal(str(getattr(inst_risk, "max_weekly_loss_rub", None)))
+            if getattr(inst_risk, "max_weekly_loss_rub", None) is not None
+            else Decimal(str(self._global.max_weekly_loss_rub))
+        )
+
+        if trades_today is not None and trades_today >= max_trades_per_day:
             return RiskDecision(
                 allowed=False,
-                reason=f"max_trades_per_day reached ({self._global.max_trades_per_day})",
+                reason=f"max_trades_per_day reached ({max_trades_per_day})",
             )
-        if trades_week is not None and trades_week >= self._global.max_trades_per_week:
+        if trades_week is not None and trades_week >= max_trades_per_week:
             return RiskDecision(
                 allowed=False,
-                reason=f"max_trades_per_week reached ({self._global.max_trades_per_week})",
+                reason=f"max_trades_per_week reached ({max_trades_per_week})",
             )
 
-        if self._global.max_daily_loss_rub > 0 and daily_loss_rub is not None:
-            if daily_loss_rub >= Decimal(str(self._global.max_daily_loss_rub)):
+        if max_daily_loss_rub > 0 and daily_loss_rub is not None:
+            if daily_loss_rub >= max_daily_loss_rub:
                 return RiskDecision(
                     allowed=False,
-                    reason=f"max_daily_loss_rub reached ({self._global.max_daily_loss_rub})",
+                    reason=f"max_daily_loss_rub reached ({max_daily_loss_rub})",
                 )
-        if self._global.max_weekly_loss_rub > 0 and weekly_loss_rub is not None:
-            if weekly_loss_rub >= Decimal(str(self._global.max_weekly_loss_rub)):
+        if max_weekly_loss_rub > 0 and weekly_loss_rub is not None:
+            if weekly_loss_rub >= max_weekly_loss_rub:
                 return RiskDecision(
                     allowed=False,
-                    reason=f"max_weekly_loss_rub reached ({self._global.max_weekly_loss_rub})",
+                    reason=f"max_weekly_loss_rub reached ({max_weekly_loss_rub})",
                 )
 
         if open_positions_total >= self._global.max_positions_total and current_position_qty == 0:
@@ -109,7 +132,18 @@ class RiskGate:
         if signal.atr is not None and equity_rub is not None:
             atr = signal.atr
             if atr > 0:
-                risk_budget = equity_rub * Decimal(str(self._global.risk_per_trade_pct))
+                rp = risk_per_trade_pct_override
+                if rp is None:
+                    # allow per-instrument override too
+                    rp = (
+                        Decimal(str(getattr(inst_risk, "risk_per_trade_pct", None)))
+                        if getattr(inst_risk, "risk_per_trade_pct", None) is not None
+                        else Decimal(str(self._global.risk_per_trade_pct))
+                    )
+                # Normalize percent-like values: 0.5 -> 0.5%
+                if rp > 0 and rp >= Decimal("0.1"):
+                    rp = rp / Decimal("100")
+                risk_budget = equity_rub * rp
                 max_qty_by_risk = int((risk_budget / atr).to_integral_value(rounding="ROUND_FLOOR"))
                 if max_qty_by_risk <= 0:
                     return RiskDecision(allowed=False, reason="risk budget too small for ATR sizing")
