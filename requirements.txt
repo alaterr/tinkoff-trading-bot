@@ -1,4 +1,5 @@
-tinkoff-investments==0.2.0b59
+# PyPI package is currently quarantined; install from official GitHub release tag.
+tinkoff-investments @ git+https://github.com/Tinkoff/invest-python.git@0.2.0b118
 pydantic[dotenv]==1.9.1
 numpy==1.22.4
 pytest==7.1.2

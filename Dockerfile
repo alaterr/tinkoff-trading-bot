@@ -10,6 +10,7 @@ WORKDIR /app
 
 # System deps (sqlite already available via stdlib; tzdata for ZoneInfo).
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
     tzdata \
   && rm -rf /var/lib/apt/lists/*
 
