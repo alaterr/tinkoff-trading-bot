@@ -24,4 +24,9 @@ def resolve_strategy(strategy_name: StrategyName, figi: str, *args, **kwargs) ->
     """
     if strategy_name not in strategies:
         raise UnsupportedStrategyError(strategy_name)
-    return strategies[strategy_name](figi=figi, *args, **kwargs)
+    cls = strategies[strategy_name]
+    # D1 runner needs an explicit string strategy name (e.g. "donchian_atr").
+    # Keep IntervalStrategy backward-compatible by not injecting extra kwargs there.
+    if cls is D1PositionalStrategyRunner:
+        kwargs.setdefault("strategy_name", strategy_name.value)
+    return cls(figi=figi, *args, **kwargs)
