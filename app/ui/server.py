@@ -819,7 +819,6 @@ class UiServer:
             instrument_config=inst_cfg,
             global_risk=cfg.global_risk,
             global_execution=cfg.global_execution,
-            strategy_name=strat.value,
             strategy_params=inst_cfg.strategy.parameters,
             **extra_kwargs,
         )

@@ -54,7 +54,6 @@ async def run():
             instrument_config=instrument_config,
             global_risk=instruments_config.global_risk,
             global_execution=instruments_config.global_execution,
-            strategy_name=instrument_config.strategy.name.value,
             strategy_params=instrument_config.strategy.parameters,
             **extra_kwargs,
         )
