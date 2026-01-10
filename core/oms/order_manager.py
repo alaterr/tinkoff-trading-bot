@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from tinkoff.invest.grpc.orders_pb2 import ORDER_DIRECTION_BUY, ORDER_DIRECTION_SELL, ORDER_TYPE_MARKET
+from t_tech.invest.grpc.orders_pb2 import ORDER_DIRECTION_BUY, ORDER_DIRECTION_SELL, ORDER_TYPE_MARKET
 
 from app.client import TinkoffClient
 from core.models.entities import Fill, Order, OrderIntent, OrderType, Side

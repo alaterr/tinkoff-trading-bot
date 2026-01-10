@@ -1,7 +1,5 @@
-# PyPI package is currently quarantined/unavailable.
-# Install directly from the official GitHub repository.
-# For fully reproducible builds you can pin a commit SHA later.
-tinkoff-investments @ git+https://github.com/Tinkoff/invest-python.git@main
+# Official SDK (replacement for quarantined tinkoff-investments/tinkoff packages)
+t-tech-investments==0.3.1
 pydantic[dotenv]==1.9.1
 numpy==1.22.4
 pytest==7.1.2

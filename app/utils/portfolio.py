@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from tinkoff.invest import PortfolioPosition, OrderState
+from t_tech.invest import PortfolioPosition, OrderState
 
 
 def get_position(positions: List[PortfolioPosition], figi: str) -> Optional[PortfolioPosition]:

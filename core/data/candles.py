@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Iterable, List, Optional
 
-from tinkoff.invest import CandleInterval, HistoricCandle
+from t_tech.invest import CandleInterval, HistoricCandle
 
 from app.client import TinkoffClient
 from core.models.entities import Candle

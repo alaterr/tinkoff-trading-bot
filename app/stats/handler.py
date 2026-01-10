@@ -1,6 +1,6 @@
 import asyncio
 
-from tinkoff.invest import OrderExecutionReportStatus, AioRequestError
+from t_tech.invest import OrderExecutionReportStatus, AioRequestError
 
 from app.client import TinkoffClient
 from app.stats.sqlite_client import StatsSQLiteClient

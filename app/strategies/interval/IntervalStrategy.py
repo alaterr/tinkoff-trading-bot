@@ -5,14 +5,14 @@ from typing import List, Optional
 from uuid import uuid4
 
 import numpy as np
-from tinkoff.invest import CandleInterval, HistoricCandle, AioRequestError, Instrument
-from tinkoff.invest.grpc.instruments_pb2 import INSTRUMENT_ID_TYPE_FIGI
-from tinkoff.invest.grpc.orders_pb2 import (
+from t_tech.invest import CandleInterval, HistoricCandle, AioRequestError, Instrument
+from t_tech.invest.grpc.instruments_pb2 import INSTRUMENT_ID_TYPE_FIGI
+from t_tech.invest.grpc.orders_pb2 import (
     ORDER_DIRECTION_SELL,
     ORDER_DIRECTION_BUY,
     ORDER_TYPE_MARKET,
 )
-from tinkoff.invest.utils import now
+from t_tech.invest.utils import now
 
 from app.client import client
 from app.settings import settings

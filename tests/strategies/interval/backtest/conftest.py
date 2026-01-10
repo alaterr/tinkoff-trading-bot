@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from pytest_mock import MockerFixture
-from tinkoff.invest import (
+from t_tech.invest import (
     GetAccountsResponse,
     Account,
     Client,
@@ -22,9 +22,9 @@ from tinkoff.invest import (
     InstrumentResponse,
     Instrument,
 )
-from tinkoff.invest.caching.market_data_cache.cache_settings import MarketDataCacheSettings
-from tinkoff.invest.services import MarketDataCache, Services
-from tinkoff.invest.utils import now
+from t_tech.invest.caching.market_data_cache.cache_settings import MarketDataCacheSettings
+from t_tech.invest.services import MarketDataCache, Services
+from t_tech.invest.utils import now
 
 from app.client import TinkoffClient
 from app.settings import settings

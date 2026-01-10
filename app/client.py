@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Optional
 
-from tinkoff.invest import (
+from t_tech.invest import (
     AsyncClient,
     Client,
     PostOrderResponse,
@@ -10,9 +10,9 @@ from tinkoff.invest import (
     GetTradingStatusResponse,
     InstrumentResponse,
 )
-from tinkoff.invest.async_services import AsyncServices, MarketDataService
-from tinkoff.invest.caching.market_data_cache.cache_settings import MarketDataCacheSettings
-from tinkoff.invest.services import MarketDataCache, Services
+from t_tech.invest.async_services import AsyncServices, MarketDataService
+from t_tech.invest.caching.market_data_cache.cache_settings import MarketDataCacheSettings
+from t_tech.invest.services import MarketDataCache, Services
 
 from app.settings import settings
 
