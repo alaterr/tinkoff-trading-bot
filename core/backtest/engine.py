@@ -66,68 +66,83 @@ def run_backtest_target_qty(
             target = int(sig.target_qty)
             delta = target - pos
             if delta != 0:
-                side = "buy" if delta > 0 else "sell"
-                qty = abs(delta)
-                fill_price = _apply_slippage(c.close, side=side, slippage_bps=cfg.price_slippage_bps)
-                if cfg.futures_price_multiplier is not None:
-                    cash_before = cash
-                    pos, avg_price, cash, commission = apply_futures_fill(
-                        pos=pos,
-                        avg_price=avg_price,
-                        cash=cash,
-                        side=side,
-                        qty=qty,
-                        price=fill_price,
-                        price_multiplier=cfg.futures_price_multiplier,
-                        commission_bps=cfg.commission_bps,
-                    )
-                    pnl = cash - cash_before
-                else:
-                    pos_before = pos
-                    avg_before = avg_price
-                    notional = fill_price * Decimal(qty)
-                    commission = (cfg.commission_bps / Decimal("10000")) * abs(notional)
-                    # Cashflow: buy consumes cash; sell increases cash
-                    if side == "buy":
-                        cash -= notional + commission
-                    else:
-                        cash += notional - commission
-                    # Best-effort realized P&L net of commission (spot-like).
-                    pnl = -commission
-                    delta_signed = qty if side == "buy" else -qty
-                    if pos_before != 0 and avg_before is not None and (pos_before * delta_signed) < 0:
-                        closing = min(abs(pos_before), abs(delta_signed))
-                        sign = Decimal("1") if pos_before > 0 else Decimal("-1")
-                        realized = (fill_price - avg_before) * Decimal(closing) * sign
-                        pnl = realized - commission
-                    # Update avg_price for next fills (best-effort)
-                    new_pos = pos_before + delta_signed
-                    if new_pos == 0:
-                        avg_price = None
-                    elif (pos_before == 0) or (avg_before is None):
-                        avg_price = fill_price
-                    elif (pos_before * delta_signed) > 0:
-                        w1 = Decimal(abs(pos_before))
-                        w2 = Decimal(abs(delta_signed))
-                        avg_price = ((w1 * avg_before) + (w2 * fill_price)) / Decimal(abs(new_pos))
-                    else:
-                        # reversed -> new entry at fill_price
-                        if abs(delta_signed) > abs(pos_before):
-                            avg_price = fill_price
-                    pos = target
+                fill_price = _apply_slippage(c.close, side=("buy" if delta > 0 else "sell"), slippage_bps=cfg.price_slippage_bps)
 
-                trades.append(
-                    Trade(
-                        ts=c.time.isoformat(),
-                        figi=figi,
-                        strategy=strategy_name,
-                        side=side,
-                        qty=qty,
-                        price=fill_price,
-                        commission=commission,
-                        pnl=pnl,
+                # If we reverse in one step, split into close + open for clean round-trip stats.
+                reversing = (pos != 0 and target != 0 and ((pos > 0 and target < 0) or (pos < 0 and target > 0)))
+                steps = []
+                if reversing:
+                    close_side = "sell" if pos > 0 else "buy"
+                    open_side = "buy" if target > 0 else "sell"
+                    steps = [(close_side, abs(pos)), (open_side, abs(target))]
+                else:
+                    side = "buy" if delta > 0 else "sell"
+                    steps = [(side, abs(delta))]
+
+                for side, qty in steps:
+                    if qty <= 0:
+                        continue
+                    if cfg.futures_price_multiplier is not None:
+                        cash_before = cash
+                        pos, avg_price, cash, commission = apply_futures_fill(
+                            pos=pos,
+                            avg_price=avg_price,
+                            cash=cash,
+                            side=side,
+                            qty=qty,
+                            price=fill_price,
+                            price_multiplier=cfg.futures_price_multiplier,
+                            commission_bps=cfg.commission_bps,
+                        )
+                        pnl = cash - cash_before
+                    else:
+                        pos_before = pos
+                        avg_before = avg_price
+                        notional = fill_price * Decimal(qty)
+                        commission = (cfg.commission_bps / Decimal("10000")) * abs(notional)
+                        # Cashflow: buy consumes cash; sell increases cash
+                        if side == "buy":
+                            cash -= notional + commission
+                        else:
+                            cash += notional - commission
+                        # Best-effort realized P&L net of commission (spot-like).
+                        pnl = -commission
+                        delta_signed = qty if side == "buy" else -qty
+                        if pos_before != 0 and avg_before is not None and (pos_before * delta_signed) < 0:
+                            closing = min(abs(pos_before), abs(delta_signed))
+                            sign = Decimal("1") if pos_before > 0 else Decimal("-1")
+                            realized = (fill_price - avg_before) * Decimal(closing) * sign
+                            pnl = realized - commission
+                        # Update avg_price for next fills (best-effort)
+                        new_pos = pos_before + delta_signed
+                        if new_pos == 0:
+                            avg_price = None
+                        elif (pos_before == 0) or (avg_before is None):
+                            avg_price = fill_price
+                        elif (pos_before * delta_signed) > 0:
+                            w1 = Decimal(abs(pos_before))
+                            w2 = Decimal(abs(delta_signed))
+                            avg_price = ((w1 * avg_before) + (w2 * fill_price)) / Decimal(abs(new_pos))
+                        else:
+                            # reversed -> new entry at fill_price
+                            if abs(delta_signed) > abs(pos_before):
+                                avg_price = fill_price
+                        pos = new_pos
+
+                    trades.append(
+                        Trade(
+                            ts=c.time.isoformat(),
+                            figi=figi,
+                            strategy=strategy_name,
+                            side=side,
+                            qty=qty,
+                            price=fill_price,
+                            commission=commission,
+                            pnl=pnl,
+                        )
                     )
-                )
+
+                pos = target
 
         # Mark-to-market
         if cfg.futures_price_multiplier is not None:

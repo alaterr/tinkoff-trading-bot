@@ -52,13 +52,21 @@ def summarize(trades: List[Trade], equity_curve: List[EquityPoint]) -> BacktestS
     eq = [p.equity for p in equity_curve]
     total_pnl = (eq[-1] - eq[0]) if len(eq) >= 2 else Decimal("0")
 
-    # Winrate: count positive realized PnL per *round-trip* trade is complex.
-    # MVP: count profitable days where equity increased (stable + deterministic).
-    wins = 0
-    for i in range(1, len(eq)):
-        if eq[i] > eq[i - 1]:
-            wins += 1
-    winrate = float(wins / (len(eq) - 1)) if len(eq) >= 2 else 0.0
+    # Winrate: by round-trip (from non-zero position back to flat).
+    # We use per-fill Trade.pnl (best-effort) and segment by position reaching 0.
+    pos = 0
+    trip_pnl = Decimal("0")
+    trips: List[Decimal] = []
+    for t in trades:
+        prev_pos = pos
+        d = int(t.qty) if str(t.side).lower().startswith("buy") else -int(t.qty)
+        pos += d
+        trip_pnl += (t.pnl or Decimal("0"))
+        if prev_pos != 0 and pos == 0:
+            trips.append(trip_pnl)
+            trip_pnl = Decimal("0")
+    wins = sum(1 for p in trips if p > 0)
+    winrate = float(wins / len(trips)) if trips else 0.0
 
     return BacktestSummary(
         trades=len(trades),

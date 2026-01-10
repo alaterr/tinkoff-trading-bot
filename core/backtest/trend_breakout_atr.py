@@ -199,32 +199,45 @@ def run_backtest_trend_breakout_atr(
             delta = max_order_qty if delta > 0 else -max_order_qty
             target = pos + delta
         if delta != 0:
-            side = "buy" if delta > 0 else "sell"
-            qty = abs(delta)
-            fill_price = _apply_slippage(c.close, side=side, slippage_bps=cfg.price_slippage_bps)
-            cash_before = cash
-            pos, avg_price, cash, commission = apply_futures_fill(
-                pos=pos,
-                avg_price=avg_price,
-                cash=cash,
-                side=side,
-                qty=qty,
-                price=fill_price,
-                price_multiplier=pm,
-                commission_bps=cfg.commission_bps,
-            )
-            trades.append(
-                Trade(
-                    ts=c.time.isoformat(),
-                    figi=figi,
-                    strategy="trend_breakout_atr",
+            fill_price = _apply_slippage(c.close, side=("buy" if delta > 0 else "sell"), slippage_bps=cfg.price_slippage_bps)
+            reversing = (pos != 0 and target != 0 and ((pos > 0 and target < 0) or (pos < 0 and target > 0)))
+            steps = []
+            if reversing:
+                close_side = "sell" if pos > 0 else "buy"
+                open_side = "buy" if target > 0 else "sell"
+                steps = [(close_side, abs(pos)), (open_side, abs(target))]
+            else:
+                side = "buy" if delta > 0 else "sell"
+                steps = [(side, abs(delta))]
+
+            for side, qty in steps:
+                if qty <= 0:
+                    continue
+                cash_before = cash
+                pos, avg_price, cash, commission = apply_futures_fill(
+                    pos=pos,
+                    avg_price=avg_price,
+                    cash=cash,
                     side=side,
                     qty=qty,
                     price=fill_price,
-                    commission=commission,
-                    pnl=cash - cash_before,
+                    price_multiplier=pm,
+                    commission_bps=cfg.commission_bps,
                 )
-            )
+                trades.append(
+                    Trade(
+                        ts=c.time.isoformat(),
+                        figi=figi,
+                        strategy="trend_breakout_atr",
+                        side=side,
+                        qty=qty,
+                        price=fill_price,
+                        commission=commission,
+                        pnl=cash - cash_before,
+                    )
+                )
+
+            pos = target
 
             # Set levels when entering/reversing into non-zero position
             if pos != 0 and a is not None:
