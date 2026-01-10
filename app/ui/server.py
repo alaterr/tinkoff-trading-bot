@@ -360,6 +360,7 @@ INDEX_HTML = """<!doctype html>
           <select id="strategySelect" style="width:100%; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary);">
             <option value="donchian_atr">donchian_atr</option>
             <option value="ema_atr">ema_atr</option>
+            <option value="trend_breakout_atr">trend_breakout_atr</option>
           </select>
           <div class="muted" style="margin-top:0.75rem;">Описание стратегии:</div>
           <div id="strategyDesc" class="muted" style="white-space: pre-wrap; line-height: 1.45; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem;">
@@ -801,6 +802,9 @@ INDEX_HTML = """<!doctype html>
         if (strategy === 'ema_atr') {
           return {"ema_fast":20,"ema_slow":50,"atr_period":14,"atr_stop_mult":"3","cooldown_days":5,"base_target_qty":1};
         }
+        if (strategy === 'trend_breakout_atr') {
+          return {"timeframe":"1h","breakout_lookback":20,"trend_lookback":50,"atr_period":14,"atr_stop_mult":"2","atr_tp_mult":"3","risk_per_trade_pct":"0.5","exit_before_close_minutes":0};
+        }
         // donchian_atr
         return {"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1};
       }
@@ -831,6 +835,40 @@ INDEX_HTML = """<!doctype html>
             '- atr_stop_mult: множитель ATR (для стоп-логики/сайзинга; стоп может быть реализован на уровне раннера)',
             '- cooldown_days: пауза после выхода (для уменьшения “пилы”)',
             '- base_target_qty: базовая целевая позиция (в контрактах)',
+          ].join('\\n');
+        }
+        if (strategy === 'trend_breakout_atr') {
+          return [
+            'Trend Breakout + Donchian + ATR (1h/4h + фильтр тренда D1)',
+            '',
+            'Идея: торговать пробои канала Дончиана на 1H/4H, но входить только по направлению долгосрочного тренда.',
+            'Тренд определяется по дневной EMA(trend_lookback): если EMA растёт (EMA[t] > EMA[t-1]) — разрешены только лонги; если падает — только шорты.',
+            '',
+            'Данные:',
+            '- Базовый ТФ: 1h или 4h (4h агрегируется из 1h свечей).',
+            '- Тренд: дневные свечи (D1) для EMA.',
+            '',
+            'Вход:',
+            '- Лонг: Close > DonchianUpper(breakout_lookback) И тренд вверх.',
+            '- Шорт: Close < DonchianLower(breakout_lookback) И тренд вниз.',
+            '',
+            'Размер позиции:',
+            '- Рассчитывается от риска на сделку: risk_per_trade_pct × equity / (ATR × atr_stop_mult).',
+            '  Примечание: это best-effort оценка без учёта мультипликатора контракта/лотности, поэтому для реальной торговли обязательно выставляй max_position_qty/max_order_qty.',
+            '',
+            'Выход:',
+            '- Стоп-лосс/тейк-профит по ATR (контроль по закрытию свечи):',
+            '  SL = entry ± atr_stop_mult × ATR, TP = entry ± atr_tp_mult × ATR.',
+            '- Переворот по противоположному пробою + смена тренда.',
+            '',
+            'Параметры:',
+            '- timeframe: "1h" или "4h"',
+            '- breakout_lookback: окно Дончиана',
+            '- trend_lookback: период EMA на дневках',
+            '- atr_period: период ATR',
+            '- atr_stop_mult / atr_tp_mult: множители SL/TP',
+            '- risk_per_trade_pct: риск на сделку (в процентах, например "0.5" = 0.5%)',
+            '- exit_before_close_minutes: резерв под ручной выход перед сессией (пока не реализован для MOEX сессий)',
           ].join('\\n');
         }
         // donchian_atr

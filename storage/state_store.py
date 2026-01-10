@@ -167,6 +167,20 @@ class StateStore:
             )
             """
         )
+
+        # Generic per-(strategy, figi) key-value state (entry price, stops, etc.)
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_kv (
+                strategy_name TEXT NOT NULL,
+                figi TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(strategy_name, figi, key)
+            )
+            """
+        )
         self._conn.commit()
 
     def set_job_decision(self, *, job_id: str, payload: dict[str, Any], ts: Optional[datetime] = None) -> None:
@@ -261,6 +275,38 @@ class StateStore:
                 }
             )
         return out
+
+    def set_kv(self, *, strategy_name: str, figi: str, key: str, value: str, ts: Optional[datetime] = None) -> None:
+        assert self._conn is not None
+        if ts is None:
+            ts = datetime.now(timezone.utc)
+        self._conn.execute(
+            """
+            INSERT INTO strategy_kv(strategy_name, figi, key, value, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(strategy_name, figi, key) DO UPDATE SET
+                value=excluded.value,
+                updated_at=excluded.updated_at
+            """,
+            (strategy_name, figi, key, str(value), _dt_to_str(ts)),
+        )
+        self._conn.commit()
+
+    def get_kv(self, *, strategy_name: str, figi: str, key: str) -> Optional[str]:
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT value FROM strategy_kv WHERE strategy_name=? AND figi=? AND key=?",
+            (strategy_name, figi, key),
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def delete_kv(self, *, strategy_name: str, figi: str, key: str) -> None:
+        assert self._conn is not None
+        self._conn.execute(
+            "DELETE FROM strategy_kv WHERE strategy_name=? AND figi=? AND key=?",
+            (strategy_name, figi, key),
+        )
+        self._conn.commit()
 
     def list_open_orders(self) -> list[str]:
         """

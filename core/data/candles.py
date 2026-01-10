@@ -97,3 +97,91 @@ class CandleRepository:
         out = normalized[-n:]
         return D1FetchResult(candles=out, last_closed_ts=out[-1].time)
 
+    async def fetch_last_intraday(
+        self,
+        *,
+        figi: str,
+        n: int,
+        timeframe: str,
+        to: Optional[datetime] = None,
+        gap_fill_days: int = 10,
+    ) -> D1FetchResult:
+        """
+        Fetch last N intraday candles (1h or 4h).
+        For 4h, we aggregate from 1h candles (SDK support varies).
+        Returns only closed candles.
+        """
+        if n <= 0:
+            return D1FetchResult(candles=[], last_closed_ts=None)
+
+        now_ts = to or datetime.now(timezone.utc)
+        tf = timeframe.lower().strip()
+        if tf not in {"1h", "4h"}:
+            raise ValueError("timeframe must be '1h' or '4h'")
+
+        # Request more than N to survive weekends/holidays + gaps
+        hours_per_bar = 1 if tf == "1h" else 4
+        lookback_hours = max(24 * 14, (n + gap_fill_days) * hours_per_bar + 24)
+        from_ts = now_ts - timedelta(hours=lookback_hours)
+
+        raw: List[HistoricCandle] = []
+        async for hc in self._broker.get_all_candles(
+            figi=figi,
+            from_=from_ts,
+            to=now_ts,
+            interval=CandleInterval.CANDLE_INTERVAL_HOUR,
+        ):
+            raw.append(hc)
+
+        normalized: List[Candle] = []
+        for hc in raw:
+            c = _hc_to_candle(figi, hc)
+            # For intraday hour bars: consider closed if time < now (small buffer)
+            if c.time <= (now_ts - timedelta(seconds=5)):
+                normalized.append(c)
+
+        normalized.sort(key=lambda c: c.time)
+        if not normalized:
+            return D1FetchResult(candles=[], last_closed_ts=None)
+
+        if tf == "1h":
+            out = normalized[-n:]
+            return D1FetchResult(candles=out, last_closed_ts=out[-1].time)
+
+        # Aggregate 1h -> 4h
+        buckets: dict[datetime, list[Candle]] = {}
+        for c in normalized:
+            t = c.time.astimezone(timezone.utc)
+            bucket_start = t.replace(minute=0, second=0, microsecond=0)
+            bucket_start = bucket_start.replace(hour=(bucket_start.hour // 4) * 4)
+            buckets.setdefault(bucket_start, []).append(c)
+
+        agg: List[Candle] = []
+        for bucket_start in sorted(buckets.keys()):
+            cs = buckets[bucket_start]
+            # Require full 4 hours (best-effort): 4 candles in the bucket.
+            if len(cs) < 4:
+                continue
+            cs.sort(key=lambda x: x.time)
+            o = cs[0].open
+            h = max(x.high for x in cs)
+            l = min(x.low for x in cs)
+            cl = cs[-1].close
+            v = sum(int(x.volume) for x in cs)
+            agg.append(
+                Candle(
+                    figi=figi,
+                    time=cs[-1].time,
+                    open=o,
+                    high=h,
+                    low=l,
+                    close=cl,
+                    volume=v,
+                )
+            )
+
+        if not agg:
+            return D1FetchResult(candles=[], last_closed_ts=None)
+        out = agg[-n:]
+        return D1FetchResult(candles=out, last_closed_ts=out[-1].time)
+
