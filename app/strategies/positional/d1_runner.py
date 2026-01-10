@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Optional
 
 from t_tech.invest import AioRequestError, OrderExecutionReportStatus
@@ -20,6 +22,12 @@ from core.oms.order_manager import OrderManager
 from core.risk.gate import RiskGate
 from core.utils.time import moscow_tz, start_of_day, start_of_week
 from storage.state_store import StateStore
+
+# Ensure strategies package is accessible (PYTHONPATH=/app should work, but add fallback)
+_strategies_path = Path(__file__).parent.parent.parent / "strategies"
+if _strategies_path.exists() and str(_strategies_path.parent) not in sys.path:
+    sys.path.insert(0, str(_strategies_path.parent))
+
 from strategies.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
 from strategies.ema_atr import EmaAtrTrendStrategy, EmaAtrConfig
 

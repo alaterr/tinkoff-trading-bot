@@ -24,5 +24,6 @@ RUN python -m compileall -q /app
 # Persist state + candle cache under /data (mounted PVC)
 WORKDIR /data
 
+# Ensure PYTHONPATH is set when running
 CMD ["python", "/app/app/main.py"]
 
