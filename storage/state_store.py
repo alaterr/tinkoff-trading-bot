@@ -142,7 +142,49 @@ class StateStore:
             )
             """
         )
+
+        # UI / observability: last decision snapshot per running job
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_decisions (
+                job_id TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
+
+    def set_job_decision(self, *, job_id: str, payload: dict[str, Any], ts: Optional[datetime] = None) -> None:
+        assert self._conn is not None
+        if ts is None:
+            ts = datetime.now(timezone.utc)
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        self._conn.execute(
+            """
+            INSERT INTO job_decisions(job_id, updated_at, payload_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (job_id, _dt_to_str(ts), payload_json),
+        )
+        self._conn.commit()
+
+    def list_job_decisions(self) -> list[dict[str, Any]]:
+        assert self._conn is not None
+        rows = self._conn.execute(
+            "SELECT job_id, updated_at, payload_json FROM job_decisions ORDER BY updated_at DESC"
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for job_id, updated_at, payload_json in rows:
+            try:
+                payload = json.loads(payload_json or "{}")
+            except Exception:
+                payload = {"raw": payload_json}
+            out.append({"job_id": job_id, "updated_at": updated_at, "payload": payload})
+        return out
 
     def list_open_orders(self) -> list[str]:
         """

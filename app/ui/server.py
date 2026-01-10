@@ -413,6 +413,19 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
+          <h3>🔎 Последнее решение (прозрачность)</h3>
+          <div class="muted">Показывает, что джоба увидела на последней D1 свече: индикаторы → сигнал → RiskGate → план ордера</div>
+          <div class="table-container">
+            <table id="decisionsTbl">
+              <thead><tr><th>Job ID</th><th>Свеча (UTC)</th><th>Close</th><th>Позиция</th><th>Цель</th><th>Δ</th><th>Риск</th><th>Причина</th><th>Ордер</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="card fade-in" style="grid-column: 1 / -1;">
           <h3>📈 Стратегии</h3>
           <div class="muted">Сконфигурированные стратегии и время последней обработки</div>
           <div class="table-container">
@@ -691,6 +704,24 @@ INDEX_HTML = """<!doctype html>
           const live = await jget('/api/broker/portfolio');
           document.getElementById('liveTotal').textContent = live.total_amount_portfolio ? formatMoney(live.total_amount_portfolio) : 'N/A';
           document.getElementById('liveCash').textContent = live.total_amount_currencies ? formatMoney(live.total_amount_currencies) : 'N/A';
+
+          // Decisions (transparency)
+          const dec = await jget('/api/jobs/decisions');
+          const decItems = (dec && dec.items) ? dec.items : [];
+          fillTable('decisionsTbl', decItems, ['job_id','candle_time','close','current_position_qty','target_qty','delta_qty','risk','reason','order'], {
+            job_id: v => `<code style="font-size: 0.75rem">${v}</code>`,
+            candle_time: v => v ? formatDate(v) : '',
+            close: v => v ? String(v) : '',
+            current_position_qty: v => String(v ?? ''),
+            target_qty: v => (v === null || v === undefined) ? '' : String(v),
+            delta_qty: v => (v === null || v === undefined) ? '' : String(v),
+            risk: (v, row) => {
+              const ok = row.risk_allowed;
+              return ok ? badge('OK', 'success') : badge('STOP', 'danger');
+            },
+            reason: v => v ? String(v) : '',
+            order: v => v ? `<code style="font-size: 0.75rem">${v}</code>` : ''
+          });
         } catch (err) {
           console.error('Refresh error:', err);
         }
@@ -868,6 +899,46 @@ class UiServer:
                 mode = "sandbox" if self._job_modes.get(jid, True) else "real"
             items.append({"job_id": jid, "figi": figi, "strategy": strat, "status": status, "mode": mode})
         return _json_response({"items": items})
+
+    async def handle_job_decisions(self, request: web.Request) -> web.Response:
+        """
+        Last decision snapshot per job (written by runners into state.db).
+        """
+        try:
+            rows = self.store.list_job_decisions()
+            items = []
+            for r in rows:
+                job_id = r.get("job_id")
+                payload = r.get("payload") or {}
+                ind = payload.get("indicators") or {}
+                sig = payload.get("signal") or {}
+                plan = payload.get("plan") or {}
+                order = plan.get("order") or {}
+                side = order.get("side")
+                qty = order.get("intended_qty")
+                client_order_id = plan.get("client_order_id")
+                order_str = ""
+                if side or qty or client_order_id:
+                    order_str = f"{side} {qty} ({client_order_id or '-'})"
+
+                items.append(
+                    {
+                        "job_id": job_id,
+                        "candle_time": ind.get("candle_time"),
+                        "close": ind.get("close"),
+                        "current_position_qty": payload.get("current_position_qty"),
+                        "target_qty": plan.get("target_qty") if plan.get("target_qty") is not None else sig.get("target_qty"),
+                        "delta_qty": plan.get("delta_qty"),
+                        "risk_allowed": (payload.get("risk") or {}).get("allowed"),
+                        "risk": "OK" if (payload.get("risk") or {}).get("allowed") else "STOP",
+                        "reason": (payload.get("risk") or {}).get("reason") or sig.get("reason"),
+                        "order": order_str,
+                    }
+                )
+            return _json_response({"items": items})
+        except Exception:  # noqa: BLE001
+            logger.exception("handle_job_decisions failed")
+            return _json_response({"items": []})
 
     async def handle_job_start(self, request: web.Request) -> web.Response:
         try:
@@ -1287,6 +1358,7 @@ async def start_ui_server(*, store: StateStore, host: str, port: int) -> web.App
     app.router.add_get("/api/jobs", srv.handle_jobs)
     app.router.add_post("/api/jobs/start", srv.handle_job_start)
     app.router.add_post("/api/jobs/stop", srv.handle_job_stop)
+    app.router.add_get("/api/jobs/decisions", srv.handle_job_decisions)
     app.router.add_get("/api/strategies", srv.handle_strategies)
     app.router.add_get("/api/positions", srv.handle_positions)
     app.router.add_get("/api/orders", srv.handle_orders)

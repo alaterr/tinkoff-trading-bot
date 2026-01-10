@@ -15,6 +15,7 @@ from app.client import client as broker_client
 from app.instruments_config.models import GlobalExecutionConfig, GlobalRiskConfig, InstrumentConfig
 from app.settings import settings
 from app.strategies.base import BaseStrategy
+from app.strategies.positional.indicators import atr, donchian_high, donchian_low, ema
 from core.data.candles import CandleRepository
 from core.futures.rollover import should_rollover
 from core.models.entities import OrderIntent
@@ -117,6 +118,107 @@ class D1PositionalStrategyRunner(BaseStrategy):
             self.lookback = max(cfg.ema_fast, cfg.ema_slow) + cfg.atr_period + 5
         else:
             raise ValueError(f"Unsupported D1 runner strategy: {strategy_name}")
+
+    @property
+    def job_id(self) -> str:
+        return f"{self.figi}|{self.strategy_name}"
+
+    def _indicators_snapshot(self, candles) -> dict[str, Any]:
+        """
+        Best-effort indicator values for UI transparency.
+        Uses the same inputs as signal logic (closed candles).
+        """
+        try:
+            last = candles[-1]
+        except Exception:
+            return {}
+
+        out: dict[str, Any] = {
+            "candle_time": getattr(last, "time", None),
+            "close": getattr(last, "close", None),
+        }
+        try:
+            if self.strategy_name == "donchian_atr":
+                prev = candles[:-1]
+                bl = int(getattr(self.strategy, "cfg").breakout_lookback)  # type: ignore[attr-defined]
+                el = int(getattr(self.strategy, "cfg").exit_lookback)  # type: ignore[attr-defined]
+                ap = int(getattr(self.strategy, "cfg").atr_period)  # type: ignore[attr-defined]
+                out.update(
+                    {
+                        "donchian_high": donchian_high(prev, bl),
+                        "donchian_low": donchian_low(prev, bl),
+                        "exit_high": donchian_high(prev, el),
+                        "exit_low": donchian_low(prev, el),
+                        "atr": atr(candles, ap),
+                    }
+                )
+            elif self.strategy_name == "ema_atr":
+                closes = [c.close for c in candles]
+                ef = int(getattr(self.strategy, "cfg").ema_fast)  # type: ignore[attr-defined]
+                es = int(getattr(self.strategy, "cfg").ema_slow)  # type: ignore[attr-defined]
+                ap = int(getattr(self.strategy, "cfg").atr_period)  # type: ignore[attr-defined]
+                efast = ema(closes, ef)
+                eslow = ema(closes, es)
+                out.update(
+                    {
+                        "ema_fast": efast[-1] if efast else None,
+                        "ema_slow": eslow[-1] if eslow else None,
+                        "atr": atr(candles, ap),
+                    }
+                )
+        except Exception:  # noqa: BLE001
+            # transparency must never break trading loop
+            return out
+        return out
+
+    def _record_decision(
+        self,
+        *,
+        candles,
+        current_position_qty: int,
+        in_cooldown: bool,
+        signal,
+        risk_allowed: bool,
+        risk_reason: str,
+        target_qty: Optional[int],
+        delta_qty: Optional[int],
+        order_intent: Optional[OrderIntent],
+        client_order_id: Optional[str] = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "figi": self.figi,
+            "strategy": self.strategy_name,
+            "sandbox": bool(settings.sandbox),
+            "in_cooldown": bool(in_cooldown),
+            "current_position_qty": int(current_position_qty),
+            "signal": None
+            if signal is None
+            else {
+                "type": getattr(signal, "signal_type", None),
+                "target_qty": getattr(signal, "target_qty", None),
+                "reason": getattr(signal, "reason", None),
+                "atr": getattr(signal, "atr", None),
+                "ts": getattr(signal, "ts", None),
+            },
+            "indicators": self._indicators_snapshot(candles),
+            "risk": {"allowed": bool(risk_allowed), "reason": str(risk_reason)},
+            "plan": {
+                "target_qty": target_qty,
+                "delta_qty": delta_qty,
+                "order": None
+                if order_intent is None
+                else {
+                    "side": getattr(order_intent, "side", None),
+                    "intended_qty": getattr(order_intent, "intended_qty", None),
+                },
+                "client_order_id": client_order_id,
+            },
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.store.set_job_decision(job_id=self.job_id, payload=payload)
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _ensure_account_id(self) -> Optional[str]:
         if self.account_id:
@@ -325,12 +427,13 @@ class D1PositionalStrategyRunner(BaseStrategy):
                     weekly_loss = -weekly_pnl if weekly_pnl < 0 else Decimal("0")
 
                 # Generate signal
+                in_cooldown = False
                 if self.strategy_name == "ema_atr":
                     # cooldown handling v1: not implemented yet (needs state); assume not in cooldown
                     sig = self.strategy.generate_signal(
                         candles=res.candles,
                         current_position_qty=current_qty,
-                        in_cooldown=False,
+                        in_cooldown=in_cooldown,
                         strategy_name=self.strategy_name,
                     )
                 else:
@@ -340,6 +443,21 @@ class D1PositionalStrategyRunner(BaseStrategy):
                         strategy_name=self.strategy_name,
                     )
                 if sig is None:
+                    # Transparency: record that no signal was generated for this candle
+                    try:
+                        self._record_decision(
+                            candles=res.candles,
+                            current_position_qty=current_qty,
+                            in_cooldown=in_cooldown,
+                            signal=None,
+                            risk_allowed=False,
+                            risk_reason="нет сигнала",
+                            target_qty=None,
+                            delta_qty=None,
+                            order_intent=None,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     self.store.set_last_processed_candle_close(
                         strategy_name=self.strategy_name, figi=self.figi, candle_close_ts=res.last_closed_ts
                     )
@@ -358,6 +476,21 @@ class D1PositionalStrategyRunner(BaseStrategy):
                     equity_rub=equity,
                 )
                 if not decision.allowed or decision.intent is None:
+                    # Transparency: record block reason
+                    try:
+                        self._record_decision(
+                            candles=res.candles,
+                            current_position_qty=current_qty,
+                            in_cooldown=in_cooldown,
+                            signal=sig,
+                            risk_allowed=False,
+                            risk_reason=decision.reason,
+                            target_qty=getattr(sig, "target_qty", None),
+                            delta_qty=None,
+                            order_intent=None,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     logger.info(
                         "RiskGate blocked strategy=%s figi=%s reason=%s",
                         self.strategy_name,
@@ -370,6 +503,27 @@ class D1PositionalStrategyRunner(BaseStrategy):
                     await asyncio.sleep(self.runner_config.poll_seconds)
                     continue
 
+                # Transparency: record planned order before sending
+                target_qty = getattr(sig, "target_qty", None)
+                try:
+                    delta_qty = int(target_qty) - int(current_qty) if target_qty is not None else None
+                except Exception:  # noqa: BLE001
+                    delta_qty = None
+                try:
+                    self._record_decision(
+                        candles=res.candles,
+                        current_position_qty=current_qty,
+                        in_cooldown=in_cooldown,
+                        signal=sig,
+                        risk_allowed=True,
+                        risk_reason=decision.reason,
+                        target_qty=target_qty,
+                        delta_qty=delta_qty,
+                        order_intent=decision.intent,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
                 placed = await self.oms.place_market_order(decision.intent)
                 logger.info(
                     "Order %s strategy=%s figi=%s side=%s qty=%s new=%s",
@@ -380,6 +534,22 @@ class D1PositionalStrategyRunner(BaseStrategy):
                     decision.intent.intended_qty,
                     placed.created_new,
                 )
+                # Transparency: record placed order id
+                try:
+                    self._record_decision(
+                        candles=res.candles,
+                        current_position_qty=current_qty,
+                        in_cooldown=in_cooldown,
+                        signal=sig,
+                        risk_allowed=True,
+                        risk_reason=decision.reason,
+                        target_qty=target_qty,
+                        delta_qty=delta_qty,
+                        order_intent=decision.intent,
+                        client_order_id=placed.order.client_order_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 if placed.created_new:
                     self.store.add_trade_event(
                         ts=now_utc,
