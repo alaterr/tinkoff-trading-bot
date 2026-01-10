@@ -1665,6 +1665,8 @@ class UiServer:
         from datetime import timedelta
         from decimal import Decimal
 
+        import asyncio
+
         from core.backtest.engine import BacktestConfig, run_backtest_target_qty
         from core.backtest.futures import futures_spec_from_instrument
         from core.backtest.trend_breakout_atr import TrendBreakoutParams, run_backtest_trend_breakout_atr
@@ -1795,7 +1797,19 @@ class UiServer:
         if strat.value == "trend_breakout_atr":
             tf = str(params.get("timeframe") or "1h")
             # Intraday + D1
-            candles_tf_all = await repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf)
+            # Guardrails: big intraday ranges can take a long time.
+            if tf.lower().strip() in {"1min", "5min"}:
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "Для trend_breakout_atr поддерживаются только timeframe 1h/4h (а не 1min/5min).",
+                    },
+                    status=400,
+                )
+            candles_tf_all = await asyncio.wait_for(
+                repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf),
+                timeout=90,
+            )
             if not candles_tf_all:
                 logger.warning(
                     "backtest_run no candles returned figi=%s interval=%s from_ts=%s to_ts=%s",
@@ -1818,8 +1832,13 @@ class UiServer:
             if not candles_tf:
                 candles_tf = candles_tf_all[-min(len(candles_tf_all), 24 * days) :]
 
-            d1_from = to_ts - timedelta(days=days + int(params.get("trend_lookback", 50)) + 60)
-            candles_d1 = await repo.fetch_range(figi=figi, from_ts=d1_from, to_ts=to_ts, interval=CandleInterval.CANDLE_INTERVAL_DAY)
+            # D1 padding for EMA fast/slow
+            ema_slow = int(params.get("trend_ema_slow", 50))
+            d1_from = to_ts - timedelta(days=days + ema_slow + 90)
+            candles_d1 = await asyncio.wait_for(
+                repo.fetch_range(figi=figi, from_ts=d1_from, to_ts=to_ts, interval=CandleInterval.CANDLE_INTERVAL_DAY),
+                timeout=60,
+            )
             if not candles_d1:
                 logger.warning(
                     "backtest_run no candles returned figi=%s interval=D1 from_ts=%s to_ts=%s",
@@ -1911,7 +1930,28 @@ class UiServer:
             # Intraday only (1min/5min). Note: large day ranges may be heavy; keep user-provided days but
             # rely on broker/SDK to enforce limits. UI can retry with fewer days if needed.
             tf = str(params.get("timeframe") or "1min")
-            candles_tf_all = await repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf)
+            tf_norm = tf.lower().strip()
+            # Hard guardrails to prevent "hang" on huge 1-minute ranges.
+            if tf_norm == "1min" and days > 10:
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "timeframe=1min слишком тяжёлый для long-run. Уменьшите days до 10 (или выберите 5min).",
+                    },
+                    status=400,
+                )
+            if tf_norm == "5min" and days > 45:
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "timeframe=5min слишком тяжёлый для long-run. Уменьшите days до 45.",
+                    },
+                    status=400,
+                )
+            candles_tf_all = await asyncio.wait_for(
+                repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf),
+                timeout=120,
+            )
             if not candles_tf_all:
                 logger.warning(
                     "backtest_run no candles returned figi=%s interval=%s from_ts=%s to_ts=%s",

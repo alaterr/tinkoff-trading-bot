@@ -64,6 +64,46 @@ def run_backtest_target_qty(
         sig = signal_fn(window, pos)
         if sig is not None:
             target = int(sig.target_qty)
+
+            # Intraday risk sizing support:
+            # If a strategy emits direction-only target_qty (+1/-1) and provides risk_stop + risk_per_trade_pct,
+            # convert to an absolute target_qty based on current equity.
+            if (
+                target != 0
+                and abs(target) == 1
+                and pos == 0
+                and getattr(sig, "risk_stop", None) is not None
+                and getattr(sig, "risk_per_trade_pct", None) is not None
+            ):
+                rs = sig.risk_stop
+                rp = sig.risk_per_trade_pct
+                try:
+                    rs = Decimal(str(rs))
+                    rp = Decimal(str(rp))
+                except Exception:  # noqa: BLE001
+                    rs = None
+                    rp = None
+                if rs is not None and rp is not None and rs > 0 and rp > 0:
+                    # Normalize percent-like values: 0.3 => 0.3%
+                    if rp >= Decimal("0.1"):
+                        rp = rp / Decimal("100")
+                    # Equity before this bar execution (mark-to-market)
+                    if cfg.futures_price_multiplier is not None:
+                        mtm_pre = futures_equity(
+                            cash=cash,
+                            pos=pos,
+                            avg_price=avg_price,
+                            price=c.close,
+                            price_multiplier=cfg.futures_price_multiplier,
+                        )
+                    else:
+                        mtm_pre = cash + (Decimal(pos) * c.close)
+                    risk_budget = mtm_pre * rp
+                    qty_by_risk = int((risk_budget / rs).to_integral_value(rounding="ROUND_FLOOR"))
+                    if qty_by_risk > 0:
+                        # Safety cap for backtests to avoid accidental huge positions if rs is miscomputed.
+                        qty_by_risk = min(qty_by_risk, 100_000)
+                        target = (1 if target > 0 else -1) * qty_by_risk
             delta = target - pos
             if delta != 0:
                 fill_price = _apply_slippage(c.close, side=("buy" if delta > 0 else "sell"), slippage_bps=cfg.price_slippage_bps)
