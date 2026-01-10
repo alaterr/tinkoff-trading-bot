@@ -1081,7 +1081,12 @@ class UiServer:
         self._job_defs: dict[str, dict[str, Any]] = {}
         for inst in instruments_config.instruments:
             jid = f"{inst.figi}|{inst.strategy.name.value}"
-            self._job_defs[jid] = {"figi": inst.figi, "strategy": inst.strategy.name}
+            self._job_defs[jid] = {
+                "figi": inst.figi,
+                "strategy": inst.strategy.name,
+                "params": dict(inst.strategy.parameters),
+                "instrument_config": inst,
+            }
 
         # Load UI-managed jobs from DB (persisted)
         try:
@@ -1479,8 +1484,9 @@ class UiServer:
 
             # Create strategy instance with same args as legacy main (but no autostart).
             from app.instruments_config.parser import instruments_config as cfg
-            # If job is created from UI, it may not exist in instruments_config.json.
-            if "params" in meta:
+            inst_cfg = meta.get("instrument_config")
+            if inst_cfg is None:
+                # UI-created job: construct minimal InstrumentConfig
                 from app.instruments_config.models import InstrumentConfig, RolloverConfig, StrategyConfig
 
                 inst_cfg = InstrumentConfig(
@@ -1493,8 +1499,6 @@ class UiServer:
                     rollover=RolloverConfig(enabled=False),
                     strategy=StrategyConfig(name=strat, parameters=dict(meta.get("params") or {})),
                 )
-            else:
-                inst_cfg = next(i for i in cfg.instruments if i.figi == figi and i.strategy.name == strat)
             extra_kwargs = {}
             if strat == StrategyName.INTERVAL:
                 extra_kwargs = dict(inst_cfg.strategy.parameters)
@@ -1525,72 +1529,6 @@ class UiServer:
         except Exception:  # noqa: BLE001
             logger.exception("handle_job_start failed")
             return _json_response({"ok": False, "error": "Внутренняя ошибка сервера. Смотрите логи контейнера."}, status=500)
-        if jid not in self._job_defs:
-            return _json_response({"ok": False, "error": "unknown job_id"}, status=404)
-        if not broker_client.credentials_set():
-            return _json_response({"ok": False, "error": "set token first"}, status=400)
-        t = self._jobs.get(jid)
-        if t is not None and not t.done():
-            return _json_response({"ok": True, "status": "already_running"})
-
-        # Safety: do not allow real trading unless explicitly enabled in env + confirmed in UI.
-        if not sandbox:
-            if not settings.i_know_what_i_am_doing:
-                return _json_response(
-                    {
-                        "ok": False,
-                        "error": "real trading is locked. Set I_KNOW_WHAT_I_AM_DOING=true in env to enable real mode.",
-                    },
-                    status=403,
-                )
-            if not confirm:
-                return _json_response({"ok": False, "error": "confirmation required for real mode"}, status=400)
-
-        # Disallow mixing sandbox/real jobs in one process (shared broker client).
-        for running_jid, task in self._jobs.items():
-            if task is not None and not task.done():
-                running_mode = self._job_modes.get(running_jid, True)
-                if running_mode != sandbox:
-                    return _json_response(
-                        {
-                            "ok": False,
-                            "error": "cannot run sandbox and real jobs одновременно в одном процессе",
-                        },
-                        status=409,
-                    )
-
-        # Switch broker client mode for this job.
-        # (token is already stored inside broker_client from /api/credentials)
-        await broker_client.set_credentials(token=settings.token or "", sandbox=sandbox)
-        await broker_client.ainit()
-
-        meta = self._job_defs[jid]
-        figi = meta["figi"]
-        strat: StrategyName = meta["strategy"]
-
-        # Create strategy instance with same args as legacy main (but no autostart).
-        from app.instruments_config.parser import instruments_config as cfg
-
-        inst_cfg = next(i for i in cfg.instruments if i.figi == figi and i.strategy.name == strat)
-        extra_kwargs = {}
-        if strat == StrategyName.INTERVAL:
-            extra_kwargs = dict(inst_cfg.strategy.parameters)
-        strategy = resolve_strategy(
-            strategy_name=strat,
-            figi=figi,
-            instrument_config=inst_cfg,
-            global_risk=cfg.global_risk,
-            global_execution=cfg.global_execution,
-            strategy_params=inst_cfg.strategy.parameters,
-            **extra_kwargs,
-        )
-
-        async def _run_job():
-            await strategy.start()
-
-        self._jobs[jid] = asyncio.create_task(_run_job())
-        self._job_modes[jid] = sandbox
-        return _json_response({"ok": True, "status": "started"})
 
     async def handle_job_stop(self, request: web.Request) -> web.Response:
         body = await request.json()
