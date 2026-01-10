@@ -1,0 +1,13 @@
+apiVersion: v2
+name: tinkoff-trading-bot
+description: Tinkoff Trading Bot - Positional D1 futures trading with RiskGate, OMS, and UI
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - trading
+  - tinkoff
+  - futures
+  - algorithmic-trading
+maintainers:
+  - name: Trading Bot Team

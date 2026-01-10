@@ -6,7 +6,8 @@ from pydantic import BaseSettings
 
 class Settings(BaseSettings):
     app_name: str = "qwertyo1"
-    token: str
+    # Token may be provided via env (.env) or set at runtime via UI (job mode).
+    token: Optional[str] = None
     account_id: Optional[str] = None
     sandbox: bool = True
     # Safety latch: real trading mode requires explicit confirmation flag.

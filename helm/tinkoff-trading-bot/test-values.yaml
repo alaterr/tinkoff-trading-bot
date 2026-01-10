@@ -1,0 +1,26 @@
+# Test values for helm template/dry-run
+image:
+  repository: ghcr.io/test/tinkoff-trading-bot
+  tag: test
+
+secrets:
+  TOKEN: "test-token-12345"
+  ACCOUNT_ID: "test-account"
+
+env:
+  SANDBOX: "true"
+  UI_ENABLED: "true"
+
+instrumentsConfig:
+  global_risk:
+    max_positions_total: 5
+    kill_switch_file: "/data/kill.switch"
+  global_execution:
+    order_type: "market"
+    timezone: "Europe/Moscow"
+  instruments:
+    - figi: "TEST_FIGI"
+      strategy:
+        name: "donchian_atr"
+        parameters:
+          breakout_lookback: 20

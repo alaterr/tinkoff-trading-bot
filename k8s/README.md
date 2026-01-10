@@ -28,7 +28,8 @@ Then open `http://localhost:8080/`.
 
 ### Configure secrets
 
-Edit secret values (TOKEN/ACCOUNT_ID) before applying:
+In job mode you can leave TOKEN empty and set it via UI at runtime.
+If you do set TOKEN here, it will be used as a default for legacy AUTO_START.
 
 ```bash
 kubectl -n tinkoff-bot apply -f k8s/base/secret.yaml

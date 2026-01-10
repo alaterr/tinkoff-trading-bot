@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tinkoff-trading-bot.fullname" . }}
+  namespace: {{ include "tinkoff-trading-bot.namespace" . }}
+  labels:
+    {{- include "tinkoff-trading-bot.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tinkoff-trading-bot.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tinkoff-trading-bot.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.serviceAccount.name }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: bot
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "tinkoff-trading-bot.fullname" . }}-config
+            - secretRef:
+                name: {{ include "tinkoff-trading-bot.fullname" . }}-secrets
+          {{- if or .Values.persistence.enabled .Values.killSwitch.enabled }}
+          volumeMounts:
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: /data
+            - name: instruments-config
+              mountPath: /data/instruments_config.json
+              subPath: instruments_config.json
+              readOnly: true
+            {{- end }}
+            {{- if .Values.killSwitch.enabled }}
+            - name: kill-switch
+              mountPath: /etc/kill-switch
+              readOnly: true
+            {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if or .Values.persistence.enabled .Values.killSwitch.enabled }}
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "tinkoff-trading-bot.fullname" . }}-data
+        - name: instruments-config
+          configMap:
+            name: {{ include "tinkoff-trading-bot.fullname" . }}-config
+            items:
+              - key: instruments_config.json
+                path: instruments_config.json
+        {{- end }}
+        {{- if .Values.killSwitch.enabled }}
+        - name: kill-switch
+          configMap:
+            name: {{ include "tinkoff-trading-bot.fullname" . }}-kill-switch
+            optional: true
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

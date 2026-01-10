@@ -1,0 +1,20 @@
+# Example values for REAL trading deployment
+# WARNING: Only use with explicit confirmation!
+
+image:
+  repository: ghcr.io/YOUR_ORG/tinkoff-trading-bot
+  tag: latest
+
+env:
+  SANDBOX: "false"
+  I_KNOW_WHAT_I_AM_DOING: "true"  # REQUIRED for real trading
+  UI_ENABLED: "true"
+  AUTO_START: "false"
+
+secrets:
+  TOKEN: ""  # Set via --set secrets.TOKEN="your-real-token"
+  ACCOUNT_ID: ""
+
+service:
+  enabled: true
+  type: ClusterIP

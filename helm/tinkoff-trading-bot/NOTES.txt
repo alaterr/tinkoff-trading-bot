@@ -1,0 +1,15 @@
+1. Get the UI URL by running these commands:
+
+   export POD_NAME=$(kubectl get pods --namespace {{ .Values.namespace.name }} -l "app.kubernetes.io/name={{ include "tinkoff-trading-bot.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+   export CONTAINER_PORT=$(kubectl get pod --namespace {{ .Values.namespace.name }} $POD_NAME --template="{{(index (index .spec.containers 0).ports 0).containerPort}}")
+   echo "Visit http://127.0.0.1:8080 to use your application"
+   kubectl --namespace {{ .Values.namespace.name }} port-forward $POD_NAME 8080:$CONTAINER_PORT
+
+2. Or use Service port-forward:
+
+   kubectl port-forward -n {{ .Values.namespace.name }} svc/{{ include "tinkoff-trading-bot.fullname" . }}-ui 8080:80
+
+3. Access UI at http://localhost:8080
+
+4. Set token via UI (Credentials section) or via env:
+   kubectl set env deployment/{{ include "tinkoff-trading-bot.fullname" . }} -n {{ .Values.namespace.name }} --from secret/{{ include "tinkoff-trading-bot.fullname" . }}-secrets

@@ -29,6 +29,18 @@ To run the bot, you need to have a Tinkoff account.
 
 ## Kubernetes (k8s)
 
+### Helm (recommended)
+
+```bash
+helm install tinkoff-bot ./helm/tinkoff-trading-bot \
+  --set secrets.TOKEN="your-token" \
+  --set image.repository="ghcr.io/YOUR_ORG/tinkoff-trading-bot"
+```
+
+See `helm/tinkoff-trading-bot/README.md` for details.
+
+### Kustomize (alternative)
+
 Manifests + Dockerfile are included. See `k8s/README.md`.
 
 ## .env file content

@@ -1,0 +1,18 @@
+# Example values for sandbox deployment
+image:
+  repository: ghcr.io/YOUR_ORG/tinkoff-trading-bot
+  tag: latest
+
+env:
+  SANDBOX: "true"
+  I_KNOW_WHAT_I_AM_DOING: "false"
+  UI_ENABLED: "true"
+  AUTO_START: "false"
+
+secrets:
+  TOKEN: ""  # Set via --set secrets.TOKEN="your-token"
+  ACCOUNT_ID: ""
+
+service:
+  enabled: true
+  type: ClusterIP

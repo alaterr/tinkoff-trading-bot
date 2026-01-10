@@ -1,0 +1,11 @@
+{{- if .Values.killSwitch.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tinkoff-trading-bot.fullname" . }}-kill-switch
+  namespace: {{ include "tinkoff-trading-bot.namespace" . }}
+  labels:
+    {{- include "tinkoff-trading-bot.labels" . | nindent 4 }}
+data:
+  kill.switch: "1"
+{{- end }}
