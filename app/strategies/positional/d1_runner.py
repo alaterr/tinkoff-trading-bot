@@ -24,16 +24,38 @@ from core.utils.time import moscow_tz, start_of_day, start_of_week
 from storage.state_store import StateStore
 
 # Ensure strategies package is accessible
-# This file is at: app/strategies/positional/d1_runner.py
-# strategies package is at: strategies/ (root level)
-# So we need to go up 4 levels: positional -> strategies -> app -> root
+# In Docker: file is at /app/app/strategies/positional/d1_runner.py, strategies is at /app/strategies/
+# Locally: file is at ./app/strategies/positional/d1_runner.py, strategies is at ./strategies/
 _current_file = Path(__file__).resolve()
-_project_root = _current_file.parent.parent.parent.parent  # app/strategies/positional -> app/strategies -> app -> root
-_strategies_dir = _project_root / "strategies"
 
-# Add project root to sys.path if strategies exists there and root is not already in path
-# This works both locally (PYTHONPATH=./) and in Docker (PYTHONPATH=/app)
-if _strategies_dir.exists() and _strategies_dir.is_dir():
+# Find project root: directory that contains both 'app' and 'strategies' at the same level
+# Or directory that contains 'strategies' and is named 'app' (Docker case: /app)
+_project_root = None
+_current = _current_file.parent
+for _ in range(6):  # Max 6 levels up
+    _strategies_check = _current / "strategies"
+    _app_check = _current / "app"
+    # In Docker: /app contains both /app/app and /app/strategies
+    # Locally: ./ contains both ./app and ./strategies
+    if _strategies_check.exists() and _strategies_check.is_dir():
+        # Check if parent has both app and strategies (true root)
+        _parent = _current.parent
+        _parent_app = _parent / "app"
+        _parent_strategies = _parent / "strategies"
+        if _parent_app.exists() and _parent_strategies.exists():
+            # Parent is the real root
+            _project_root = _parent
+        elif _current.name == "app" and _app_check.exists():
+            # We're in /app, and it has /app/app and /app/strategies
+            _project_root = _current
+        else:
+            # This directory has strategies, assume it's root
+            _project_root = _current
+        break
+    _current = _current.parent
+
+# If found, add to sys.path
+if _project_root is not None:
     _root_str = str(_project_root)
     if _root_str not in sys.path:
         sys.path.insert(0, _root_str)
