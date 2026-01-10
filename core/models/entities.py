@@ -42,6 +42,13 @@ class Signal:
     reason: str = ""
     # Strategy may attach ATR-based risk hint for sizing in RiskGate.
     atr: Optional[Decimal] = None
+    # Intraday strategies may attach risk / exit hints.
+    # risk_per_trade_pct supports both fraction-like (0.003 == 0.3%) and percent-like (0.3 == 0.3%).
+    risk_per_trade_pct: Optional[Decimal] = None
+    # Per-contract risk in currency (RUB) to compute sizing: qty = floor((risk_pct*equity) / risk_stop)
+    risk_stop: Optional[Decimal] = None
+    sl_points: Optional[Decimal] = None
+    tp_points: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)

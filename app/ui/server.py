@@ -361,6 +361,7 @@ INDEX_HTML = """<!doctype html>
             <option value="donchian_atr">donchian_atr</option>
             <option value="ema_atr">ema_atr</option>
             <option value="trend_breakout_atr">trend_breakout_atr</option>
+            <option value="intraday_vwap_momentum">intraday_vwap_momentum</option>
           </select>
           <div class="muted" style="margin-top:0.75rem;">Описание стратегии:</div>
           <div id="strategyDesc" class="muted" style="white-space: pre-wrap; line-height: 1.45; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem;">
@@ -1184,6 +1185,9 @@ INDEX_HTML = """<!doctype html>
         if (strategy === 'trend_breakout_atr') {
           return {"timeframe":"1h","breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"2.0","atr_tp_mult":"3.0","atr_trail_mult":"1.5","trend_ema_fast":20,"trend_ema_slow":50,"risk_per_trade_pct":0.5,"volume_window":20,"min_volume_ratio":"1.2","trade_sessions":[["10:00","18:45"]],"exit_before_close_minutes":30,"days_before_expiry_to_roll":5};
         }
+        if (strategy === 'intraday_vwap_momentum') {
+          return {"timeframe":"1min","vwap_period":30,"ema_fast":5,"ema_slow":20,"atr_period":14,"sl_points":50,"tp_points":100,"risk_per_trade_pct":0.3,"volume_window":20,"min_volume_ratio":1.5,"trade_sessions":[["10:00","17:00"]],"cooldown_bars":3,"exit_before_session_end_minutes":5};
+        }
         // donchian_atr
         return {"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1};
       }
@@ -1252,6 +1256,39 @@ INDEX_HTML = """<!doctype html>
             '- volume_window / min_volume_ratio: фильтр объёма',
             '- trade_sessions: торговые окна (MSK), например [["10:00","18:45"]]',
             '- exit_before_close_minutes: выйти за N минут до конца сессии',
+          ].join('\\n');
+        }
+        if (strategy === 'intraday_vwap_momentum') {
+          return [
+            'Intraday VWAP Momentum (1m/5m, 10–20 сделок/день)',
+            '',
+            'Идея: ловить импульсы по направлению локального тренда.',
+            'Фильтры: VWAP + EMA(fast/slow) + объём + торговая сессия (MSK).',
+            '',
+            'Лонг (вход только из 0):',
+            '- Close пересекает VWAP снизу вверх',
+            '- Close > VWAP и EMA_fast > EMA_slow, EMA_fast растёт',
+            '- объём текущей свечи >= min_volume_ratio × avg(volume_window)',
+            '',
+            'Шорт (вход только из 0): зеркально.',
+            '',
+            'Выход:',
+            '- SL/TP (контроль по закрытию свечи, уровни выставляет раннер)',
+            '- ранний выход: EMA_fast пересекла EMA_slow в обратную сторону',
+            '- выход за exit_before_session_end_minutes до конца торгового окна',
+            '',
+            'Сайзинг:',
+            '- RiskGate рассчитывает кол-во контрактов по risk_per_trade_pct и стоп-риску на 1 контракт (best-effort по спецификации фьючерса).',
+            '',
+            'Параметры:',
+            '- timeframe: "1min" или "5min"',
+            '- vwap_period: окно VWAP (в минутах)',
+            '- ema_fast / ema_slow',
+            '- sl_points / tp_points (в тиках, если тик известен; иначе в “ценовых пунктах”)',
+            '- atr_sl_mult / atr_tp_mult (альтернатива фиксированным SL/TP)',
+            '- risk_per_trade_pct',
+            '- volume_window / min_volume_ratio',
+            '- trade_sessions (MSK), cooldown_bars',
           ].join('\\n');
         }
         // donchian_atr
@@ -1867,6 +1904,92 @@ class UiServer:
                     },
                     "trades": [t.__dict__ for t in trades[-200:]],
                     "equity": [p.__dict__ for p in equity[-2000:]],
+                }
+            )
+
+        if strat.value == "intraday_vwap_momentum":
+            # Intraday only (1min/5min). Note: large day ranges may be heavy; keep user-provided days but
+            # rely on broker/SDK to enforce limits. UI can retry with fewer days if needed.
+            tf = str(params.get("timeframe") or "1min")
+            candles_tf_all = await repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf)
+            if not candles_tf_all:
+                logger.warning(
+                    "backtest_run no candles returned figi=%s interval=%s from_ts=%s to_ts=%s",
+                    figi,
+                    tf,
+                    from_ts.isoformat(),
+                    to_ts.isoformat(),
+                )
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "Не удалось загрузить свечи (интрадей). Попробуйте уменьшить days или переключить timeframe на 5min.",
+                        "debug": {"interval": tf, "from_ts": from_ts.isoformat(), "to_ts": to_ts.isoformat()},
+                    },
+                    status=500,
+                )
+            end_tf = candles_tf_all[-1].time
+            cutoff_tf = end_tf - timedelta(days=days)
+            candles = [c for c in candles_tf_all if c.time >= cutoff_tf]
+            if not candles:
+                candles = candles_tf_all[-min(len(candles_tf_all), 2000) :]
+
+            from app.strategies.intraday.vwap_momentum import VwapMomentumConfig, VwapMomentumStrategy, _to_decimal
+
+            p = dict(params or {})
+            cfg0 = VwapMomentumConfig()
+            vm_cfg = VwapMomentumConfig(
+                timeframe=str(p.get("timeframe", cfg0.timeframe)),
+                vwap_period=int(p.get("vwap_period", cfg0.vwap_period)),
+                ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
+                ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
+                atr_period=int(p.get("atr_period", cfg0.atr_period)),
+                sl_points=_to_decimal(p.get("sl_points", cfg0.sl_points)),
+                tp_points=_to_decimal(p.get("tp_points", cfg0.tp_points)),
+                atr_sl_mult=_to_decimal(p.get("atr_sl_mult", cfg0.atr_sl_mult)),
+                atr_tp_mult=_to_decimal(p.get("atr_tp_mult", cfg0.atr_tp_mult)),
+                risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct))
+                or cfg0.risk_per_trade_pct,
+                volume_window=int(p.get("volume_window", cfg0.volume_window)),
+                min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
+                trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
+                cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
+                exit_before_session_end_minutes=int(
+                    p.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)
+                ),
+            )
+            st = VwapMomentumStrategy(figi=figi, config=vm_cfg)
+            sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, strategy_name=strat.value)
+
+            res = run_backtest_target_qty(figi=figi, strategy_name=strat.value, candles=candles, signal_fn=sig_fn, cfg=bt_cfg)
+            summ = summarize(res.trades, res.equity)
+            return _json_response(
+                {
+                    "ok": True,
+                    "strategy": strat.value,
+                    "figi": figi,
+                    "days": days,
+                    "initial_equity": str(bt_cfg.initial_equity),
+                    "final_equity": str(res.equity[-1].equity if res.equity else bt_cfg.initial_equity),
+                    "price_series": [{"ts": c.time.isoformat(), "close": str(c.close)} for c in candles[-2000:]],
+                    "instrument_spec": {
+                        "price_multiplier": str(f_spec.price_multiplier),
+                        "currency": f_spec.currency,
+                        "lot": f_spec.lot,
+                        "min_price_increment": None if f_spec.min_price_increment is None else str(f_spec.min_price_increment),
+                        "min_price_increment_amount": None
+                        if f_spec.min_price_increment_amount is None
+                        else str(f_spec.min_price_increment_amount),
+                        "source": f_spec.source,
+                    },
+                    "summary": {
+                        "trades": summ.trades,
+                        "winrate": summ.winrate,
+                        "total_pnl": str(summ.total_pnl),
+                        "max_drawdown": str(summ.max_drawdown),
+                    },
+                    "trades": [t.__dict__ for t in res.trades[-200:]],
+                    "equity": [p.__dict__ for p in res.equity[-2000:]],
                 }
             )
 

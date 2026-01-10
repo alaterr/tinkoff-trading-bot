@@ -139,12 +139,27 @@ class CandleRepository:
     ) -> List[Candle]:
         """
         Fetch intraday candles for timeframe:
-        - 1h: direct
+        - 1min / 5min / 1h: direct
         - 4h: aggregate from 1h
         """
         tf = timeframe.lower().strip()
-        if tf not in {"1h", "4h"}:
-            raise ValueError("timeframe must be '1h' or '4h'")
+        if tf not in {"1min", "5min", "1h", "4h"}:
+            raise ValueError("timeframe must be one of: '1min', '5min', '1h', '4h'")
+        if tf == "1min":
+            return await self.fetch_range(
+                figi=figi,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                interval=CandleInterval.CANDLE_INTERVAL_1_MIN,
+            )
+        if tf == "5min":
+            return await self.fetch_range(
+                figi=figi,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
+            )
+
         h1 = await self.fetch_range(
             figi=figi,
             from_ts=from_ts,
@@ -190,7 +205,7 @@ class CandleRepository:
         gap_fill_days: int = 10,
     ) -> D1FetchResult:
         """
-        Fetch last N intraday candles (1h or 4h).
+        Fetch last N intraday candles (1min/5min/1h/4h).
         For 4h, we aggregate from 1h candles (SDK support varies).
         Returns only closed candles.
         """
@@ -199,21 +214,23 @@ class CandleRepository:
 
         now_ts = to or datetime.now(timezone.utc)
         tf = timeframe.lower().strip()
-        if tf not in {"1h", "4h"}:
-            raise ValueError("timeframe must be '1h' or '4h'")
+        if tf not in {"1min", "5min", "1h", "4h"}:
+            raise ValueError("timeframe must be one of: '1min', '5min', '1h', '4h'")
 
-        # Request more than N to survive weekends/holidays + gaps
-        hours_per_bar = 1 if tf == "1h" else 4
-        lookback_hours = max(24 * 14, (n + gap_fill_days) * hours_per_bar + 24)
-        from_ts = now_ts - timedelta(hours=lookback_hours)
+        # Request more than N to survive gaps (best-effort).
+        if tf in {"1min", "5min"}:
+            minutes_per_bar = 1 if tf == "1min" else 5
+            lookback_minutes = max(60 * 24, (n + gap_fill_days) * minutes_per_bar + 60)
+            from_ts = now_ts - timedelta(minutes=lookback_minutes)
+            interval = CandleInterval.CANDLE_INTERVAL_1_MIN if tf == "1min" else CandleInterval.CANDLE_INTERVAL_5_MIN
+        else:
+            hours_per_bar = 1 if tf == "1h" else 4
+            lookback_hours = max(24 * 14, (n + gap_fill_days) * hours_per_bar + 24)
+            from_ts = now_ts - timedelta(hours=lookback_hours)
+            interval = CandleInterval.CANDLE_INTERVAL_HOUR
 
         raw: List[HistoricCandle] = []
-        async for hc in self._broker.get_all_candles(
-            figi=figi,
-            from_=from_ts,
-            to=now_ts,
-            interval=CandleInterval.CANDLE_INTERVAL_HOUR,
-        ):
+        async for hc in self._broker.get_all_candles(figi=figi, from_=from_ts, to=now_ts, interval=interval):
             raw.append(hc)
 
         normalized: List[Candle] = []
@@ -227,7 +244,7 @@ class CandleRepository:
         if not normalized:
             return D1FetchResult(candles=[], last_closed_ts=None)
 
-        if tf == "1h":
+        if tf in {"1min", "5min", "1h"}:
             out = normalized[-n:]
             return D1FetchResult(candles=out, last_closed_ts=out[-1].time)
 

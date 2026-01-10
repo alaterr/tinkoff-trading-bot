@@ -2,6 +2,7 @@ from typing import Dict
 
 from app.strategies.interval.IntervalStrategy import IntervalStrategy
 from app.strategies.positional.d1_runner import D1PositionalStrategyRunner
+from app.strategies.intraday.vwap_momentum_runner import VwapMomentumRunner
 from app.strategies.trend_breakout_atr import TrendBreakoutATRStrategy
 from app.strategies.base import BaseStrategy
 from app.strategies.errors import UnsupportedStrategyError
@@ -12,6 +13,7 @@ strategies: Dict[StrategyName, BaseStrategy.__class__] = {
     StrategyName.DONCHIAN_ATR: D1PositionalStrategyRunner,
     StrategyName.EMA_ATR: D1PositionalStrategyRunner,
     StrategyName.TREND_BREAKOUT_ATR: TrendBreakoutATRStrategy,
+    StrategyName.INTRADAY_VWAP_MOMENTUM: VwapMomentumRunner,
 }
 
 

@@ -11,6 +11,32 @@
           "check_interval": 60
         }
       }
+    },
+    {
+      "figi": "FUTUSD000",
+      "instrument_type": "futures",
+      "strategy": {
+        "name": "intraday_vwap_momentum",
+        "parameters": {
+          "timeframe": "1min",
+          "vwap_period": 30,
+          "ema_fast": 5,
+          "ema_slow": 20,
+          "atr_period": 14,
+          "sl_points": 50,
+          "tp_points": 100,
+          "risk_per_trade_pct": 0.3,
+          "volume_window": 20,
+          "min_volume_ratio": 1.5,
+          "trade_sessions": [["10:00", "17:00"]],
+          "cooldown_bars": 3
+        }
+      },
+      "risk": {
+        "max_position_qty": 3,
+        "max_daily_loss_rub": 10000,
+        "max_trades_per_day": 20
+      }
     }
   ]
 }

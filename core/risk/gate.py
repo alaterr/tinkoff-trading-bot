@@ -8,7 +8,7 @@ from typing import Optional
 
 from app.instruments_config.models import GlobalRiskConfig, InstrumentConfig
 from core.models.entities import OrderIntent, Side, Signal
-from core.utils.time import floor_to_day_close, moscow_tz
+from core.utils.time import moscow_tz
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,38 @@ class RiskGate:
             )
 
         # Determine desired target and convert to order intent delta (MVP: target_qty absolute).
+        # Intraday sizing mode: if signal carries risk_stop + risk_per_trade_pct and uses target_qty as direction (+/-1),
+        # compute actual target_qty from equity and per-contract risk.
         target_qty = int(signal.target_qty)
+        if (
+            target_qty != 0
+            and abs(target_qty) == 1
+            and signal.risk_stop is not None
+            and equity_rub is not None
+            and current_position_qty == 0
+        ):
+            rs = signal.risk_stop
+            if rs <= 0:
+                return RiskDecision(allowed=False, reason="risk_stop must be > 0 for risk sizing")
+
+            rp = risk_per_trade_pct_override
+            if rp is None:
+                rp = signal.risk_per_trade_pct
+            if rp is None:
+                rp = (
+                    Decimal(str(getattr(inst_risk, "risk_per_trade_pct", None)))
+                    if getattr(inst_risk, "risk_per_trade_pct", None) is not None
+                    else Decimal(str(self._global.risk_per_trade_pct))
+                )
+            # Normalize percent-like values: 0.5 -> 0.5%
+            if rp > 0 and rp >= Decimal("0.1"):
+                rp = rp / Decimal("100")
+            risk_budget = equity_rub * rp
+            max_qty_by_risk = int((risk_budget / rs).to_integral_value(rounding="ROUND_FLOOR"))
+            if max_qty_by_risk <= 0:
+                return RiskDecision(allowed=False, reason="risk budget too small for provided risk_stop")
+            target_qty = (1 if target_qty > 0 else -1) * max_qty_by_risk
+
         delta = target_qty - int(current_position_qty)
         if delta == 0:
             return RiskDecision(allowed=False, reason="no-op: target equals current position")
@@ -121,15 +152,18 @@ class RiskGate:
 
         # Per-instrument hard caps
         if instrument.max_position_qty is not None and abs(target_qty) > instrument.max_position_qty:
-            return RiskDecision(
-                allowed=False,
-                reason=f"target_qty exceeds max_position_qty ({instrument.max_position_qty})",
-            )
+            # Cap rather than block (safe default, especially for risk-sized intraday strategies)
+            target_qty = (1 if target_qty > 0 else -1) * int(instrument.max_position_qty)
+            delta = target_qty - int(current_position_qty)
+            if delta == 0:
+                return RiskDecision(allowed=False, reason="no-op after max_position_qty cap")
+            side = Side.BUY if delta > 0 else Side.SELL
+            qty = abs(delta)
         if instrument.max_order_qty is not None and qty > instrument.max_order_qty:
             qty = instrument.max_order_qty
 
         # ATR sizing (optional): if ATR & equity are provided, cap qty by risk budget / atr.
-        if signal.atr is not None and equity_rub is not None:
+        if signal.risk_stop is None and signal.atr is not None and equity_rub is not None:
             atr = signal.atr
             if atr > 0:
                 rp = risk_per_trade_pct_override
@@ -152,8 +186,11 @@ class RiskGate:
         if qty <= 0:
             return RiskDecision(allowed=False, reason="computed order qty <= 0")
 
-        tz = moscow_tz()
-        anchor_ts = floor_to_day_close(signal.ts, tz)
+        # Idempotency anchor:
+        # - for D1 strategies signal.ts already changes daily
+        # - for intraday strategies we need per-bar idempotency, so we keep original ts
+        _ = moscow_tz()  # ensure tzdata is available; keep behavior consistent
+        anchor_ts = signal.ts
 
         return RiskDecision(
             allowed=True,

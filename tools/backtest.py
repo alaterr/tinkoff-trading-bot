@@ -15,6 +15,7 @@ from reports.stats import summarize
 from reports.trade_log import write_equity_csv, write_summary_json, write_trades_csv
 from app.strategies.positional.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
 from app.strategies.positional.ema_atr import EmaAtrTrendStrategy, EmaAtrConfig
+from app.strategies.intraday.vwap_momentum import VwapMomentumConfig, VwapMomentumStrategy, _to_decimal
 
 
 def _parse_dt(s: str) -> datetime:
@@ -53,15 +54,26 @@ def main():
                 continue
 
             sname = inst.strategy.name.value
-            if sname not in {"donchian_atr", "ema_atr"}:
+            if sname not in {"donchian_atr", "ema_atr", "intraday_vwap_momentum"}:
                 continue
 
             # Fetch candles (uses sdk history cache if enabled in app settings)
             # For deterministic runs, user should freeze a time interval by --to.
             to = _parse_dt(args.to_dt) if args.to_dt else datetime.now(timezone.utc)
-            candles_n = 400  # enough for D1 indicators
-            res = await repo.fetch_last_d1(figi=inst.figi, n=candles_n, to=to)
-            candles = res.candles
+            if sname == "intraday_vwap_momentum":
+                tf = str(inst.strategy.parameters.get("timeframe", "1min"))
+                if args.from_dt:
+                    from_ts = _parse_dt(args.from_dt)
+                    candles = await repo.fetch_intraday_range(figi=inst.figi, from_ts=from_ts, to_ts=to, timeframe=tf)
+                else:
+                    # best-effort: last ~2-5 trading days depending on tf
+                    candles_n = 3000 if tf.lower().strip() == "1min" else 1200
+                    res = await repo.fetch_last_intraday(figi=inst.figi, n=candles_n, timeframe=tf, to=to)
+                    candles = res.candles
+            else:
+                candles_n = 400  # enough for D1 indicators
+                res = await repo.fetch_last_d1(figi=inst.figi, n=candles_n, to=to)
+                candles = res.candles
             if not candles:
                 continue
 
@@ -70,10 +82,36 @@ def main():
                 st = DonchianATRStrategy(figi=inst.figi, config=DonchianAtrConfig(**inst.strategy.parameters))
                 sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, strategy_name=sname)
             else:
-                st = EmaAtrTrendStrategy(figi=inst.figi, config=EmaAtrConfig(**inst.strategy.parameters))
-                sig_fn = lambda w, pos: st.generate_signal(
-                    candles=w, current_position_qty=pos, in_cooldown=False, strategy_name=sname
-                )
+                if sname == "ema_atr":
+                    st = EmaAtrTrendStrategy(figi=inst.figi, config=EmaAtrConfig(**inst.strategy.parameters))
+                    sig_fn = lambda w, pos: st.generate_signal(
+                        candles=w, current_position_qty=pos, in_cooldown=False, strategy_name=sname
+                    )
+                else:
+                    p = dict(inst.strategy.parameters or {})
+                    cfg0 = VwapMomentumConfig()
+                    vm_cfg = VwapMomentumConfig(
+                        timeframe=str(p.get("timeframe", cfg0.timeframe)),
+                        vwap_period=int(p.get("vwap_period", cfg0.vwap_period)),
+                        ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
+                        ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
+                        atr_period=int(p.get("atr_period", cfg0.atr_period)),
+                        sl_points=_to_decimal(p.get("sl_points", cfg0.sl_points)),
+                        tp_points=_to_decimal(p.get("tp_points", cfg0.tp_points)),
+                        atr_sl_mult=_to_decimal(p.get("atr_sl_mult", cfg0.atr_sl_mult)),
+                        atr_tp_mult=_to_decimal(p.get("atr_tp_mult", cfg0.atr_tp_mult)),
+                        risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct))
+                        or cfg0.risk_per_trade_pct,
+                        volume_window=int(p.get("volume_window", cfg0.volume_window)),
+                        min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
+                        trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
+                        cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
+                        exit_before_session_end_minutes=int(
+                            p.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)
+                        ),
+                    )
+                    st = VwapMomentumStrategy(figi=inst.figi, config=vm_cfg)
+                    sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, strategy_name=sname)
 
             bt_cfg = BacktestConfig(
                 initial_equity=Decimal(str(args.initial_equity)),
