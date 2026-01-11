@@ -11,7 +11,14 @@ from app.client import client as broker_client
 from app.instruments_config.models import GlobalExecutionConfig, GlobalRiskConfig, InstrumentConfig
 from app.settings import settings
 from app.strategies.base import BaseStrategy
-from app.strategies.intraday.vwap_momentum import VwapMomentumConfig, VwapMomentumStrategy, _to_decimal
+from app.strategies.intraday.vwap_momentum import VwapMomentumStrategy, _to_decimal
+from app.strategies.intraday.params import parse_vwap_momentum_config
+from app.strategies.intraday.risk import (
+    levels_vwap,
+    norm_risk_pct,
+    risk_stop_rub_vwap,
+    update_vwap_trailing_stop,
+)
 from core.data.candles import CandleRepository
 from core.futures.rollover import should_rollover
 from core.models.entities import OrderIntent, Signal, SignalType
@@ -28,11 +35,6 @@ def _mv_to_decimal(mv) -> Optional[Decimal]:
         return Decimal(mv.units) + (Decimal(mv.nano) / Decimal(1_000_000_000))
     except Exception:  # noqa: BLE001
         return None
-
-
-def _norm_risk_pct(v: Decimal) -> Decimal:
-    # Accept both 0.003 (0.3%) and 0.3 (0.3%) styles.
-    return v / Decimal("100") if v >= Decimal("0.1") else v
 
 
 @dataclass(frozen=True)
@@ -68,39 +70,7 @@ class VwapMomentumRunner(BaseStrategy):
         self.strategy_name = strategy_name
         self.runner_config = runner_config
 
-        # Permissive parsing (config json may provide ints/floats/strings)
-        p = dict(strategy_params or {})
-        cfg0 = VwapMomentumConfig()
-        self.cfg = VwapMomentumConfig(
-            timeframe=str(p.get("timeframe", cfg0.timeframe)),
-            vwap_period=int(p.get("vwap_period", cfg0.vwap_period)),
-            vwap_window=(int(p["vwap_window"]) if p.get("vwap_window") is not None else cfg0.vwap_window),
-            ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
-            ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
-            require_fast_slope=bool(p.get("require_fast_slope", cfg0.require_fast_slope)),
-            entry_mode=str(p.get("entry_mode", cfg0.entry_mode)),
-            retest_lookback=int(p.get("retest_lookback", cfg0.retest_lookback)),
-            require_retest_breakout=bool(p.get("require_retest_breakout", cfg0.require_retest_breakout)),
-            trend_timeframe=(str(p["trend_timeframe"]) if p.get("trend_timeframe") is not None else cfg0.trend_timeframe),
-            trend_ema_fast=int(p.get("trend_ema_fast", cfg0.trend_ema_fast)),
-            trend_ema_slow=int(p.get("trend_ema_slow", cfg0.trend_ema_slow)),
-            atr_period=int(p.get("atr_period", cfg0.atr_period)),
-            sl_points=_to_decimal(p.get("sl_points", cfg0.sl_points)),
-            tp_points=_to_decimal(p.get("tp_points", cfg0.tp_points)),
-            atr_sl_mult=_to_decimal(p.get("atr_sl_mult", cfg0.atr_sl_mult)),
-            atr_tp_mult=_to_decimal(p.get("atr_tp_mult", cfg0.atr_tp_mult)),
-            atr_trail_mult=_to_decimal(p.get("atr_trail_mult", cfg0.atr_trail_mult)),
-            risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct)) or cfg0.risk_per_trade_pct,
-            volume_window=int(p.get("volume_window", cfg0.volume_window)),
-            min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
-            trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
-            cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
-            exit_before_session_end_minutes=int(
-                p.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)
-            ),
-            exit_confirm_bars=int(p.get("exit_confirm_bars", cfg0.exit_confirm_bars)),
-            exit_on_vwap_cross=bool(p.get("exit_on_vwap_cross", cfg0.exit_on_vwap_cross)),
-        )
+        self.cfg = parse_vwap_momentum_config(strategy_params)
 
         self.store = StateStore(db_path="state.db")
         self.data = CandleRepository(broker=broker_client)
@@ -265,45 +235,29 @@ class VwapMomentumRunner(BaseStrategy):
         """
         lot = Decimal(self._lot_size)
         pm = self._price_multiplier
-        if self.cfg.sl_points is not None and self.cfg.sl_points > 0:
-            if self._tick_size is not None and self._tick_size > 0:
-                return (self.cfg.sl_points * self._tick_size) * pm * lot
-            # fallback: treat points as price units
-            return self.cfg.sl_points * pm * lot
-        if self.cfg.atr_sl_mult is not None and self.cfg.atr_sl_mult > 0 and atr_value is not None and atr_value > 0:
-            return (atr_value * self.cfg.atr_sl_mult) * pm * lot
-        return None
+        return risk_stop_rub_vwap(
+            cfg=self.cfg,
+            atr_value=atr_value,
+            tick_size=self._tick_size,
+            price_multiplier=pm,
+            lot=lot,
+        )
 
     def _set_levels(self, *, entry_price: Decimal, atr_value: Optional[Decimal], direction: int) -> None:
         """
         Store absolute stop/tp prices (close-based evaluation).
         Points are interpreted as ticks if tick_size is available.
         """
-        if direction == 0:
+        lv = levels_vwap(
+            cfg=self.cfg,
+            entry_price=entry_price,
+            atr_value=atr_value,
+            tick_size=self._tick_size,
+            direction=direction,
+        )
+        if lv is None:
             return
-        stop_dist = None
-        tp_dist = None
-        if self.cfg.sl_points is not None and self.cfg.sl_points > 0:
-            if self._tick_size is not None and self._tick_size > 0:
-                stop_dist = self.cfg.sl_points * self._tick_size
-            else:
-                stop_dist = self.cfg.sl_points
-        elif self.cfg.atr_sl_mult is not None and self.cfg.atr_sl_mult > 0 and atr_value is not None and atr_value > 0:
-            stop_dist = atr_value * self.cfg.atr_sl_mult
-
-        if self.cfg.tp_points is not None and self.cfg.tp_points > 0:
-            if self._tick_size is not None and self._tick_size > 0:
-                tp_dist = self.cfg.tp_points * self._tick_size
-            else:
-                tp_dist = self.cfg.tp_points
-        elif self.cfg.atr_tp_mult is not None and self.cfg.atr_tp_mult > 0 and atr_value is not None and atr_value > 0:
-            tp_dist = atr_value * self.cfg.atr_tp_mult
-
-        if stop_dist is None or tp_dist is None:
-            return
-
-        stop = entry_price - stop_dist if direction > 0 else entry_price + stop_dist
-        tp = entry_price + tp_dist if direction > 0 else entry_price - tp_dist
+        stop, tp = lv
 
         self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="entry_price", value=str(entry_price))
         self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price", value=str(stop))
@@ -327,30 +281,32 @@ class VwapMomentumRunner(BaseStrategy):
         """
         if current_qty == 0:
             return
-        if self.cfg.atr_trail_mult is None or self.cfg.atr_trail_mult <= 0:
-            return
-        if atr_value is None or atr_value <= 0:
-            return
-
         stop_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price")
+        peak_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="peak_price")
+        trough_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="trough_price")
+
         stop = _to_decimal(stop_s)
-        dist = atr_value * self.cfg.atr_trail_mult
-        if current_qty > 0:
-            peak_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="peak_price")
-            peak = _to_decimal(peak_s) or last_close
-            peak = max(peak, last_close)
-            self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="peak_price", value=str(peak))
-            trail = peak - dist
-            if stop is None or trail > stop:
-                self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price", value=str(trail))
-        else:
-            trough_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="trough_price")
-            trough = _to_decimal(trough_s) or last_close
-            trough = min(trough, last_close)
-            self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="trough_price", value=str(trough))
-            trail = trough + dist
-            if stop is None or trail < stop:
-                self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price", value=str(trail))
+        peak = _to_decimal(peak_s)
+        trough = _to_decimal(trough_s)
+
+        direction = 1 if current_qty > 0 else -1
+        new_stop, new_peak, new_trough = update_vwap_trailing_stop(
+            direction=direction,
+            close=last_close,
+            atr_value=atr_value,
+            atr_trail_mult=self.cfg.atr_trail_mult,
+            stop_price=stop,
+            peak_price=peak,
+            trough_price=trough,
+        )
+        if new_stop is not None:
+            self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price", value=str(new_stop))
+        if new_peak is not None:
+            self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="peak_price", value=str(new_peak))
+            self.store.delete_kv(strategy_name=self.strategy_name, figi=self.figi, key="trough_price")
+        if new_trough is not None:
+            self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="trough_price", value=str(new_trough))
+            self.store.delete_kv(strategy_name=self.strategy_name, figi=self.figi, key="peak_price")
 
     async def _get_trend_direction(self) -> int:
         """
@@ -535,7 +491,7 @@ class VwapMomentumRunner(BaseStrategy):
                     weekly_loss_rub=weekly_loss,
                     equity_rub=equity,
                     # prefer signal.risk_per_trade_pct, fallback to instrument/global inside RiskGate
-                    risk_per_trade_pct_override=_norm_risk_pct(self.cfg.risk_per_trade_pct),
+                    risk_per_trade_pct_override=norm_risk_pct(self.cfg.risk_per_trade_pct),
                 )
                 if not decision.allowed or decision.intent is None:
                     self.store.set_job_decision(

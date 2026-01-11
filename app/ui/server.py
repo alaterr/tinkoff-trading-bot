@@ -2144,72 +2144,86 @@ class UiServer:
 
         try:
             if s in {"donchian_atr"}:
-                warm = max(_int(params.get("breakout_lookback", 20), 20), _int(params.get("exit_lookback", 10), 10), _int(params.get("atr_period", 14), 14)) + 5
+                from app.strategies.positional.params import parse_donchian_atr_config
+
+                cfg = parse_donchian_atr_config(params)
+                warm = max(int(cfg.breakout_lookback), int(cfg.exit_lookback), int(cfg.atr_period)) + 5
                 total = days + warm
                 series.append(("candles_D1", "D1", total))
             elif s in {"ema_atr"}:
-                warm = max(_int(params.get("ema_fast", 20), 20), _int(params.get("ema_slow", 50), 50), _int(params.get("atr_period", 14), 14)) + 5
+                from app.strategies.positional.params import parse_ema_atr_config
+
+                cfg = parse_ema_atr_config(params)
+                warm = max(int(cfg.ema_fast), int(cfg.ema_slow), int(cfg.atr_period)) + 5
                 total = days + warm
                 series.append(("candles_D1", "D1", total))
             elif s in {"trend_breakout_atr"}:
-                tf = _tf_norm(params.get("timeframe", "1h"))
+                from app.strategies.trend_breakout_atr_params import parse_trend_breakout_atr_config
+
+                cfg = parse_trend_breakout_atr_config(params)
+                tf = _tf_norm(cfg.timeframe)
                 if tf in {"1min", "5min"}:
                     return _json_response({"ok": False, "error": "Для trend_breakout_atr поддерживаются только timeframe 1h/4h."}, status=400)
                 w_tf = max(
-                    _int(params.get("breakout_lookback", 20), 20),
-                    _int(params.get("exit_lookback", 10), 10),
-                    _int(params.get("atr_period", 14), 14),
-                    _int(params.get("volume_window", 20), 20),
+                    int(cfg.breakout_lookback),
+                    int(cfg.exit_lookback),
+                    int(cfg.atr_period),
+                    int(cfg.volume_window),
                 ) + 10
                 total_tf = days + _warmup_days_from_bars(tf, w_tf)
-                d1_w = max(_int(params.get("trend_ema_fast", 20), 20), _int(params.get("trend_ema_slow", 50), 50)) + 10
+                d1_w = max(int(cfg.trend_ema_fast), int(cfg.trend_ema_slow)) + 10
                 total_d1 = days + d1_w
                 series.append((f"candles_{tf}", tf, total_tf))
                 series.append(("candles_D1", "D1", total_d1))
             elif s in {"intraday_vwap_momentum"}:
-                tf = _tf_norm(params.get("timeframe", "1min"))
+                from app.strategies.intraday.params import parse_vwap_momentum_config
+
+                cfg = parse_vwap_momentum_config(params)
+                tf = _tf_norm(cfg.timeframe)
                 if tf not in {"1min", "5min"}:
                     return _json_response({"ok": False, "error": "Для intraday_vwap_momentum timeframe должен быть 1min или 5min."}, status=400)
                 guard = _guard_days(tf, days)
                 if guard:
                     return _json_response({"ok": False, "error": guard}, status=400)
                 # vwap_bars: use vwap_window (bars) if provided, else vwap_period(minutes)/bar_minutes
-                vwap_window = params.get("vwap_window", None)
-                if vwap_window is not None:
-                    vwap_bars = max(1, _int(vwap_window, 1))
+                if cfg.vwap_window is not None:
+                    vwap_bars = max(1, int(cfg.vwap_window))
                 else:
-                    vwap_period_min = max(1, _int(params.get("vwap_period", 30), 30))
+                    vwap_period_min = max(1, int(cfg.vwap_period))
                     vwap_bars = int(math.ceil(vwap_period_min / max(1, (_bar_minutes(tf)))))
                 w_tf = max(
                     vwap_bars,
-                    _int(params.get("ema_fast", 5), 5),
-                    _int(params.get("ema_slow", 20), 20),
-                    _int(params.get("atr_period", 14), 14),
-                    _int(params.get("volume_window", 20), 20),
+                    int(cfg.ema_fast),
+                    int(cfg.ema_slow),
+                    int(cfg.atr_period),
+                    int(cfg.volume_window),
                 ) + 10
                 total_tf = days + _warmup_days_from_bars(tf, w_tf)
                 series.append((f"candles_{tf}", tf, total_tf))
 
-                tr_tf_raw = params.get("trend_timeframe", None)
+                tr_tf_raw = cfg.trend_timeframe
                 if tr_tf_raw:
                     tr_tf = _tf_norm(tr_tf_raw)
                     if tr_tf not in {"1h", "4h"}:
                         return _json_response({"ok": False, "error": "trend_timeframe должен быть 1h/4h или null."}, status=400)
-                    w_tr = max(_int(params.get("trend_ema_fast", 20), 20), _int(params.get("trend_ema_slow", 50), 50)) + 10
+                    w_tr = max(int(cfg.trend_ema_fast), int(cfg.trend_ema_slow)) + 10
                     total_tr = days + _warmup_days_from_bars(tr_tf, w_tr)
                     series.append((f"candles_trend_{tr_tf}", tr_tf, total_tr))
             elif s in {"intraday_bollinger_rsi"}:
-                tf = _tf_norm(params.get("timeframe", "5min"))
+                from app.strategies.intraday.params import parse_bollinger_rsi_config
+
+                cfg = parse_bollinger_rsi_config(params)
+                tf = _tf_norm(cfg.timeframe)
                 if tf not in {"1min", "5min"}:
                     return _json_response({"ok": False, "error": "Для intraday_bollinger_rsi timeframe должен быть 1min или 5min."}, status=400)
                 guard = _guard_days(tf, days)
                 if guard:
                     return _json_response({"ok": False, "error": guard}, status=400)
                 w_tf = max(
-                    _int(params.get("bollinger_period", 20), 20),
-                    _int(params.get("rsi_period", 14), 14),
-                    _int(params.get("atr_period", 14), 14),
-                    _int(params.get("volume_window", 30), 30),
+                    int(cfg.bollinger_period),
+                    int(cfg.rsi_period),
+                    int(cfg.atr_period),
+                    int(cfg.volume_window),
                 ) + 10
                 total_tf = days + _warmup_days_from_bars(tf, w_tf)
                 series.append((f"candles_{tf}", tf, total_tf))
@@ -2323,7 +2337,7 @@ class UiServer:
 
         from core.backtest.engine import BacktestConfig, run_backtest_target_qty
         from core.backtest.futures import futures_spec_from_instrument
-        from core.backtest.trend_breakout_atr import TrendBreakoutParams, run_backtest_trend_breakout_atr
+        from core.backtest.trend_breakout_atr import run_backtest_trend_breakout_atr
         from core.data.candles import CandleRepository
         from reports.stats import summarize
         from t_tech.invest import CandleInterval
@@ -2406,14 +2420,16 @@ class UiServer:
             )
 
             if strat.value == "donchian_atr":
-                from app.strategies.positional.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
+                from app.strategies.positional.donchian_atr import DonchianATRStrategy
+                from app.strategies.positional.params import parse_donchian_atr_config
 
-                st = DonchianATRStrategy(figi=figi, config=DonchianAtrConfig(**params))
+                st = DonchianATRStrategy(figi=figi, config=parse_donchian_atr_config(params))
                 sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, strategy_name=strat.value)
             else:
-                from app.strategies.positional.ema_atr import EmaAtrTrendStrategy, EmaAtrConfig
+                from app.strategies.positional.ema_atr import EmaAtrTrendStrategy
+                from app.strategies.positional.params import parse_ema_atr_config
 
-                st = EmaAtrTrendStrategy(figi=figi, config=EmaAtrConfig(**params))
+                st = EmaAtrTrendStrategy(figi=figi, config=parse_ema_atr_config(params))
                 sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, in_cooldown=False, strategy_name=strat.value)
 
             res = run_backtest_target_qty(figi=figi, strategy_name=strat.value, candles=candles, signal_fn=sig_fn, cfg=bt_cfg)
@@ -2460,6 +2476,10 @@ class UiServer:
                     },
                     status=400,
                 )
+            from app.strategies.trend_breakout_atr_params import parse_trend_breakout_params
+
+            # Parse once (so UI is not coupled to individual param names).
+            p = parse_trend_breakout_params(timeframe=tf, strategy_params=params)
             candles_tf_all = await asyncio.wait_for(
                 repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf),
                 timeout=90,
@@ -2487,8 +2507,7 @@ class UiServer:
                 candles_tf = candles_tf_all[-min(len(candles_tf_all), 24 * days) :]
 
             # D1 padding for EMA fast/slow
-            ema_slow = int(params.get("trend_ema_slow", 50))
-            d1_from = to_ts - timedelta(days=days + ema_slow + 90)
+            d1_from = to_ts - timedelta(days=days + int(p.trend_ema_slow) + 90)
             candles_d1 = await asyncio.wait_for(
                 repo.fetch_range(figi=figi, from_ts=d1_from, to_ts=to_ts, interval=CandleInterval.CANDLE_INTERVAL_DAY),
                 timeout=60,
@@ -2516,23 +2535,6 @@ class UiServer:
                 len(candles_d1),
                 candles_tf[0].time.isoformat() if candles_tf else None,
                 candles_tf[-1].time.isoformat() if candles_tf else None,
-            )
-
-            p = TrendBreakoutParams(
-                timeframe=tf,
-                breakout_lookback=int(params.get("breakout_lookback", 20)),
-                exit_lookback=int(params.get("exit_lookback", 10)),
-                trend_ema_fast=int(params.get("trend_ema_fast", 20)),
-                trend_ema_slow=int(params.get("trend_ema_slow", 50)),
-                atr_period=int(params.get("atr_period", 14)),
-                atr_stop_mult=Decimal(str(params.get("atr_stop_mult", "2"))),
-                atr_tp_mult=Decimal(str(params.get("atr_tp_mult", "3"))),
-                atr_trail_mult=Decimal(str(params.get("atr_trail_mult", "1.5"))),
-                risk_per_trade_pct=Decimal(str(params.get("risk_per_trade_pct", "0.5"))),
-                volume_window=int(params.get("volume_window", 20)),
-                min_volume_ratio=Decimal(str(params.get("min_volume_ratio", "1.0"))),
-                trade_sessions=tuple(tuple(x) for x in (params.get("trade_sessions") or (("10:00","18:45"),))),
-                exit_before_close_minutes=int(params.get("exit_before_close_minutes", 0)),
             )
             # Limits: for UI jobs use stored meta values; for config jobs fall back to instrument_config.
             inst_cfg = meta.get("instrument_config")
@@ -2628,35 +2630,11 @@ class UiServer:
             if not candles:
                 candles = candles_tf_all[-min(len(candles_tf_all), 2000) :]
 
-            from app.strategies.intraday.vwap_momentum import VwapMomentumConfig, VwapMomentumStrategy, _to_decimal
+            from app.strategies.intraday.params import parse_vwap_momentum_config
+            from app.strategies.intraday.risk import levels_vwap, norm_risk_pct, risk_stop_rub_vwap, update_vwap_trailing_stop
+            from app.strategies.intraday.vwap_momentum import VwapMomentumStrategy
 
-            p = dict(params or {})
-            cfg0 = VwapMomentumConfig()
-            vm_cfg = VwapMomentumConfig(
-                timeframe=str(p.get("timeframe", cfg0.timeframe)),
-                vwap_period=int(p.get("vwap_period", cfg0.vwap_period)),
-                vwap_window=(int(p["vwap_window"]) if p.get("vwap_window") is not None else cfg0.vwap_window),
-                ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
-                ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
-                trend_timeframe=(str(p["trend_timeframe"]) if p.get("trend_timeframe") is not None else cfg0.trend_timeframe),
-                trend_ema_fast=int(p.get("trend_ema_fast", cfg0.trend_ema_fast)),
-                trend_ema_slow=int(p.get("trend_ema_slow", cfg0.trend_ema_slow)),
-                atr_period=int(p.get("atr_period", cfg0.atr_period)),
-                sl_points=_to_decimal(p.get("sl_points", cfg0.sl_points)),
-                tp_points=_to_decimal(p.get("tp_points", cfg0.tp_points)),
-                atr_sl_mult=_to_decimal(p.get("atr_sl_mult", cfg0.atr_sl_mult)),
-                atr_tp_mult=_to_decimal(p.get("atr_tp_mult", cfg0.atr_tp_mult)),
-                atr_trail_mult=_to_decimal(p.get("atr_trail_mult", cfg0.atr_trail_mult)),
-                risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct))
-                or cfg0.risk_per_trade_pct,
-                volume_window=int(p.get("volume_window", cfg0.volume_window)),
-                min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
-                trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
-                cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
-                exit_before_session_end_minutes=int(
-                    p.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)
-                ),
-            )
+            vm_cfg = parse_vwap_momentum_config(params or {})
             st = VwapMomentumStrategy(figi=figi, config=vm_cfg)
 
             # Higher timeframe trend filter (optional): compute trend_dir for each bar timestamp.
@@ -2718,14 +2696,11 @@ class UiServer:
             # stop_risk_per_contract_rub is derived from:
             # - sl_points * tick_size (if available) * price_multiplier * lot
             # - OR ATR * atr_sl_mult * price_multiplier * lot
-            def _norm_risk_pct(v: Decimal) -> Decimal:
-                return v / Decimal("100") if v >= Decimal("0.1") else v
-
             # Limits: for UI jobs use stored meta values; for config jobs fall back to instrument_config.
             inst_cfg = meta.get("instrument_config")
             max_pos = int(meta.get("max_position_qty") or getattr(inst_cfg, "max_position_qty", None) or 10)
 
-            risk_frac = _norm_risk_pct(_to_decimal(p.get("risk_per_trade_pct", vm_cfg.risk_per_trade_pct)) or vm_cfg.risk_per_trade_pct)
+            risk_frac = norm_risk_pct(vm_cfg.risk_per_trade_pct)
             risk_budget = bt_cfg.initial_equity * risk_frac
             tick_size = f_spec.min_price_increment  # Decimal or None
             pm = f_spec.price_multiplier
@@ -2733,24 +2708,21 @@ class UiServer:
             last_sizing: dict[str, str] = {}
 
             def _stop_risk_per_contract_rub(window) -> Optional[Decimal]:
-                # Fixed stop in points (interpreted as ticks if tick_size is known)
-                if vm_cfg.sl_points is not None and vm_cfg.sl_points > 0:
-                    dist = (vm_cfg.sl_points * tick_size) if (tick_size is not None and tick_size > 0) else vm_cfg.sl_points
-                    return dist * pm * lot
-                # ATR-based stop
-                if (
-                    vm_cfg.atr_sl_mult is not None
-                    and vm_cfg.atr_sl_mult > 0
-                    and len(window) >= int(vm_cfg.atr_period) + 2
-                ):
-                    from app.strategies.positional.indicators import atr
+                a = None
+                try:
+                    if window and len(window) >= int(vm_cfg.atr_period) + 2:
+                        from app.strategies.positional.indicators import atr
 
-                    a = atr(window, int(vm_cfg.atr_period))
-                    if a is None or a <= 0:
-                        return None
-                    dist = a * vm_cfg.atr_sl_mult
-                    return dist * pm * lot
-                return None
+                        a = atr(window, int(vm_cfg.atr_period))
+                except Exception:  # noqa: BLE001
+                    a = None
+                return risk_stop_rub_vwap(
+                    cfg=vm_cfg,
+                    atr_value=a,
+                    tick_size=tick_size,
+                    price_multiplier=pm,
+                    lot=lot,
+                )
 
             # Close-based SL/TP/trailing simulation (same idea as runner):
             entry_price: Optional[Decimal] = None
@@ -2761,37 +2733,21 @@ class UiServer:
 
             def _set_levels(*, entry: Decimal, atr_value: Optional[Decimal], direction: int) -> None:
                 nonlocal entry_price, stop_price, tp_price, peak_price, trough_price
-                if direction == 0:
+                lv = levels_vwap(
+                    cfg=vm_cfg,
+                    entry_price=entry,
+                    atr_value=atr_value,
+                    tick_size=tick_size,
+                    direction=direction,
+                )
+                if lv is None:
                     return
-                stop_dist = None
-                tp_dist = None
-
-                # stop distance in price units
-                if vm_cfg.sl_points is not None and vm_cfg.sl_points > 0:
-                    stop_dist = (vm_cfg.sl_points * tick_size) if (tick_size is not None and tick_size > 0) else vm_cfg.sl_points
-                elif vm_cfg.atr_sl_mult is not None and vm_cfg.atr_sl_mult > 0 and atr_value is not None and atr_value > 0:
-                    stop_dist = atr_value * vm_cfg.atr_sl_mult
-
-                # tp distance in price units
-                if vm_cfg.tp_points is not None and vm_cfg.tp_points > 0:
-                    tp_dist = (vm_cfg.tp_points * tick_size) if (tick_size is not None and tick_size > 0) else vm_cfg.tp_points
-                elif vm_cfg.atr_tp_mult is not None and vm_cfg.atr_tp_mult > 0 and atr_value is not None and atr_value > 0:
-                    tp_dist = atr_value * vm_cfg.atr_tp_mult
-
-                if stop_dist is None or tp_dist is None:
-                    return
-
+                stop, tp = lv
                 entry_price = entry
-                if direction > 0:
-                    stop_price = entry - stop_dist
-                    tp_price = entry + tp_dist
-                    peak_price = entry
-                    trough_price = None
-                else:
-                    stop_price = entry + stop_dist
-                    tp_price = entry - tp_dist
-                    trough_price = entry
-                    peak_price = None
+                stop_price = stop
+                tp_price = tp
+                peak_price = entry if direction > 0 else None
+                trough_price = entry if direction < 0 else None
 
             def _clear_levels() -> None:
                 nonlocal entry_price, stop_price, tp_price, peak_price, trough_price
@@ -2803,23 +2759,15 @@ class UiServer:
 
             def _update_trailing(*, direction: int, close: Decimal, atr_value: Optional[Decimal]) -> None:
                 nonlocal stop_price, peak_price, trough_price
-                if direction == 0:
-                    return
-                if vm_cfg.atr_trail_mult is None or vm_cfg.atr_trail_mult <= 0:
-                    return
-                if atr_value is None or atr_value <= 0:
-                    return
-                dist = atr_value * vm_cfg.atr_trail_mult
-                if direction > 0:
-                    peak_price = close if peak_price is None else max(peak_price, close)
-                    trail = peak_price - dist
-                    if stop_price is None or trail > stop_price:
-                        stop_price = trail
-                else:
-                    trough_price = close if trough_price is None else min(trough_price, close)
-                    trail = trough_price + dist
-                    if stop_price is None or trail < stop_price:
-                        stop_price = trail
+                stop_price, peak_price, trough_price = update_vwap_trailing_stop(
+                    direction=direction,
+                    close=close,
+                    atr_value=atr_value,
+                    atr_trail_mult=vm_cfg.atr_trail_mult,
+                    stop_price=stop_price,
+                    peak_price=peak_price,
+                    trough_price=trough_price,
+                )
 
             def sig_fn(w, pos):
                 # 0) If in position, update trailing + exit by SL/TP (close-based)
@@ -3141,36 +3089,17 @@ class UiServer:
             if not candles:
                 candles = candles_tf_all[-min(len(candles_tf_all), 2000) :]
 
-            from app.strategies.intraday.bollinger_rsi import BollingerRsiConfig, BollingerRsiStrategy, _to_decimal
+            from app.strategies.intraday.bollinger_rsi import BollingerRsiStrategy
+            from app.strategies.intraday.params import parse_bollinger_rsi_config
+            from app.strategies.intraday.risk import levels_bollinger, norm_risk_pct, risk_stop_rub_bollinger
 
-            p = dict(params or {})
-            cfg0 = BollingerRsiConfig()
-            br_cfg = BollingerRsiConfig(
-                timeframe=str(p.get("timeframe", cfg0.timeframe)),
-                bollinger_period=int(p.get("bollinger_period", cfg0.bollinger_period)),
-                bollinger_std_mult=_to_decimal(p.get("bollinger_std_mult", cfg0.bollinger_std_mult)) or cfg0.bollinger_std_mult,
-                rsi_period=int(p.get("rsi_period", cfg0.rsi_period)),
-                rsi_overbought=_to_decimal(p.get("rsi_overbought", cfg0.rsi_overbought)) or cfg0.rsi_overbought,
-                rsi_oversold=_to_decimal(p.get("rsi_oversold", cfg0.rsi_oversold)) or cfg0.rsi_oversold,
-                atr_period=int(p.get("atr_period", cfg0.atr_period)),
-                sl_atr_mult=_to_decimal(p.get("sl_atr_mult", cfg0.sl_atr_mult)) or cfg0.sl_atr_mult,
-                tp_atr_mult=_to_decimal(p.get("tp_atr_mult", cfg0.tp_atr_mult)) or cfg0.tp_atr_mult,
-                risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct)) or cfg0.risk_per_trade_pct,
-                volume_window=int(p.get("volume_window", cfg0.volume_window)),
-                min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
-                trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
-                cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
-            )
+            br_cfg = parse_bollinger_rsi_config(params or {})
             st = BollingerRsiStrategy(figi=figi, config=br_cfg)
-
-            # Risk-based sizing for dry-run (same approach as intraday_vwap_momentum UI backtest):
-            def _norm_risk_pct(v: Decimal) -> Decimal:
-                return v / Decimal("100") if v >= Decimal("0.1") else v
 
             inst_cfg = meta.get("instrument_config")
             max_pos = int(meta.get("max_position_qty") or getattr(inst_cfg, "max_position_qty", None) or 10)
 
-            risk_frac = _norm_risk_pct(_to_decimal(p.get("risk_per_trade_pct", br_cfg.risk_per_trade_pct)) or br_cfg.risk_per_trade_pct)
+            risk_frac = norm_risk_pct(br_cfg.risk_per_trade_pct)
             risk_budget = bt_cfg.initial_equity * risk_frac
             pm = f_spec.price_multiplier
             lot = Decimal(int(f_spec.lot or 1))
@@ -3182,19 +3111,13 @@ class UiServer:
 
             def _set_levels(*, entry: Decimal, atr_value: Optional[Decimal], direction: int) -> None:
                 nonlocal entry_price, stop_price, tp_price
-                if direction == 0:
+                lv = levels_bollinger(cfg=br_cfg, entry_price=entry, atr_value=atr_value, direction=direction)
+                if lv is None:
                     return
-                if atr_value is None or atr_value <= 0:
-                    return
-                if br_cfg.sl_atr_mult is None or br_cfg.sl_atr_mult <= 0:
-                    return
-                if br_cfg.tp_atr_mult is None or br_cfg.tp_atr_mult <= 0:
-                    return
-                sl_dist = atr_value * br_cfg.sl_atr_mult
-                tp_dist = atr_value * br_cfg.tp_atr_mult
+                stop, tp = lv
                 entry_price = entry
-                stop_price = (entry - sl_dist) if direction > 0 else (entry + sl_dist)
-                tp_price = (entry + tp_dist) if direction > 0 else (entry - tp_dist)
+                stop_price = stop
+                tp_price = tp
 
             def _clear_levels() -> None:
                 nonlocal entry_price, stop_price, tp_price
@@ -3254,7 +3177,7 @@ class UiServer:
                     if a is None or a <= 0:
                         return None
                     # risk per 1 contract (RUB): ATR * sl_atr_mult * price_multiplier * lot
-                    rs = (a * br_cfg.sl_atr_mult) * pm * lot
+                    rs = risk_stop_rub_bollinger(cfg=br_cfg, atr_value=a, price_multiplier=pm, lot=lot)
                     if rs is None or rs <= 0 or risk_budget <= 0:
                         return None
                     qty = int((risk_budget / rs).to_integral_value(rounding="ROUND_FLOOR"))

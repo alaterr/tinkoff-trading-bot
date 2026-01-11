@@ -14,6 +14,7 @@ from app.instruments_config.models import GlobalExecutionConfig, GlobalRiskConfi
 from app.settings import settings
 from app.strategies.base import BaseStrategy
 from app.strategies.positional.indicators import atr, donchian_high, donchian_low, ema
+from app.strategies.trend_breakout_atr_params import parse_trend_breakout_atr_config
 from core.data.candles import CandleRepository
 from core.futures.rollover import should_rollover
 from core.models.entities import OrderIntent, Signal, SignalType
@@ -96,31 +97,7 @@ class TrendBreakoutATRStrategy(BaseStrategy):
         self.global_execution = global_execution
         self.strategy_name = strategy_name
 
-        # parse config
-        cfg = TrendBreakoutATRConfig()
-        p = dict(strategy_params or {})
-        if "timeframe" in p:
-            cfg = dataclass_replace(cfg, timeframe=str(p["timeframe"]))  # type: ignore[arg-type]
-        # manual parsing to keep permissive types
-        self.cfg = TrendBreakoutATRConfig(
-            timeframe=str(p.get("timeframe", cfg.timeframe)),
-            breakout_lookback=int(p.get("breakout_lookback", cfg.breakout_lookback)),
-            exit_lookback=int(p.get("exit_lookback", cfg.exit_lookback)),
-            trend_ema_fast=int(p.get("trend_ema_fast", cfg.trend_ema_fast)),
-            trend_ema_slow=int(p.get("trend_ema_slow", cfg.trend_ema_slow)),
-            atr_period=int(p.get("atr_period", cfg.atr_period)),
-            atr_stop_mult=_to_decimal(p.get("atr_stop_mult")) or cfg.atr_stop_mult,
-            atr_tp_mult=_to_decimal(p.get("atr_tp_mult")) or cfg.atr_tp_mult,
-            atr_trail_mult=_to_decimal(p.get("atr_trail_mult")) or cfg.atr_trail_mult,
-            risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct")) or cfg.risk_per_trade_pct,
-            exit_before_close_minutes=int(p.get("exit_before_close_minutes", cfg.exit_before_close_minutes)),
-            volume_window=int(p.get("volume_window", cfg.volume_window)),
-            min_volume_ratio=_to_decimal(p.get("min_volume_ratio")) or cfg.min_volume_ratio,
-            trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg.trade_sessions)),
-            days_before_expiry_to_roll=(
-                int(p["days_before_expiry_to_roll"]) if "days_before_expiry_to_roll" in p else None
-            ),
-        )
+        self.cfg = parse_trend_breakout_atr_config(strategy_params)
 
         self.store = StateStore(db_path="state.db")
         self.data = CandleRepository(broker=broker_client)

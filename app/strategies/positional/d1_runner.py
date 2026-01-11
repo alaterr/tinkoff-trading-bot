@@ -24,8 +24,9 @@ from core.risk.gate import RiskGate
 from core.utils.time import moscow_tz, start_of_day, start_of_week
 from storage.state_store import StateStore
 
-from app.strategies.positional.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
-from app.strategies.positional.ema_atr import EmaAtrTrendStrategy, EmaAtrConfig
+from app.strategies.positional.donchian_atr import DonchianATRStrategy
+from app.strategies.positional.ema_atr import EmaAtrTrendStrategy
+from app.strategies.positional.params import parse_donchian_atr_config, parse_ema_atr_config
 
 logger = logging.getLogger(__name__)
 
@@ -109,11 +110,11 @@ class D1PositionalStrategyRunner(BaseStrategy):
 
         # strategy instance (pure)
         if strategy_name == "donchian_atr":
-            cfg = DonchianAtrConfig(**strategy_params)
+            cfg = parse_donchian_atr_config(strategy_params)
             self.strategy = DonchianATRStrategy(figi=figi, config=cfg)
             self.lookback = max(cfg.breakout_lookback, cfg.exit_lookback) + cfg.atr_period + 5
         elif strategy_name == "ema_atr":
-            cfg = EmaAtrConfig(**strategy_params)
+            cfg = parse_ema_atr_config(strategy_params)
             self.strategy = EmaAtrTrendStrategy(figi=figi, config=cfg)
             self.lookback = max(cfg.ema_fast, cfg.ema_slow) + cfg.atr_period + 5
         else:

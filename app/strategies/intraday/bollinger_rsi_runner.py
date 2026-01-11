@@ -11,7 +11,9 @@ from app.client import client as broker_client
 from app.instruments_config.models import GlobalExecutionConfig, GlobalRiskConfig, InstrumentConfig
 from app.settings import settings
 from app.strategies.base import BaseStrategy
-from app.strategies.intraday.bollinger_rsi import BollingerRsiConfig, BollingerRsiStrategy, _to_decimal
+from app.strategies.intraday.bollinger_rsi import BollingerRsiStrategy, _to_decimal
+from app.strategies.intraday.params import parse_bollinger_rsi_config
+from app.strategies.intraday.risk import levels_bollinger, norm_risk_pct, risk_stop_rub_bollinger
 from core.data.candles import CandleRepository
 from core.futures.rollover import should_rollover
 from core.models.entities import OrderIntent, Signal, SignalType
@@ -28,11 +30,6 @@ def _mv_to_decimal(mv) -> Optional[Decimal]:
         return Decimal(mv.units) + (Decimal(mv.nano) / Decimal(1_000_000_000))
     except Exception:  # noqa: BLE001
         return None
-
-
-def _norm_risk_pct(v: Decimal) -> Decimal:
-    # Accept both 0.003 (0.3%) and 0.3 (0.3%) styles.
-    return v / Decimal("100") if v >= Decimal("0.1") else v
 
 
 @dataclass(frozen=True)
@@ -68,27 +65,7 @@ class BollingerRsiRunner(BaseStrategy):
         self.strategy_name = strategy_name
         self.runner_config = runner_config
 
-        # Permissive parsing (config json may provide ints/floats/strings)
-        p = dict(strategy_params or {})
-        cfg0 = BollingerRsiConfig()
-        self.cfg = BollingerRsiConfig(
-            timeframe=str(p.get("timeframe", cfg0.timeframe)),
-            bollinger_period=int(p.get("bollinger_period", cfg0.bollinger_period)),
-            bollinger_std_mult=_to_decimal(p.get("bollinger_std_mult", cfg0.bollinger_std_mult))
-            or cfg0.bollinger_std_mult,
-            rsi_period=int(p.get("rsi_period", cfg0.rsi_period)),
-            rsi_overbought=_to_decimal(p.get("rsi_overbought", cfg0.rsi_overbought)) or cfg0.rsi_overbought,
-            rsi_oversold=_to_decimal(p.get("rsi_oversold", cfg0.rsi_oversold)) or cfg0.rsi_oversold,
-            atr_period=int(p.get("atr_period", cfg0.atr_period)),
-            sl_atr_mult=_to_decimal(p.get("sl_atr_mult", cfg0.sl_atr_mult)) or cfg0.sl_atr_mult,
-            tp_atr_mult=_to_decimal(p.get("tp_atr_mult", cfg0.tp_atr_mult)) or cfg0.tp_atr_mult,
-            risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct))
-            or cfg0.risk_per_trade_pct,
-            volume_window=int(p.get("volume_window", cfg0.volume_window)),
-            min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
-            trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
-            cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
-        )
+        self.cfg = parse_bollinger_rsi_config(strategy_params)
 
         self.store = StateStore(db_path="state.db")
         self.data = CandleRepository(broker=broker_client)
@@ -249,31 +226,18 @@ class BollingerRsiRunner(BaseStrategy):
         Per-contract stop risk in RUB (best-effort):
         - ATR-based: (atr * sl_atr_mult) * price_multiplier * lot
         """
-        if atr_value is None or atr_value <= 0:
-            return None
-        if self.cfg.sl_atr_mult is None or self.cfg.sl_atr_mult <= 0:
-            return None
         lot = Decimal(self._lot_size)
         pm = self._price_multiplier
-        return (atr_value * self.cfg.sl_atr_mult) * pm * lot
+        return risk_stop_rub_bollinger(cfg=self.cfg, atr_value=atr_value, price_multiplier=pm, lot=lot)
 
     def _set_levels(self, *, entry_price: Decimal, atr_value: Optional[Decimal], direction: int) -> None:
         """
         Store absolute stop/tp prices (close-based evaluation) using ATR multiples.
         """
-        if direction == 0:
+        lv = levels_bollinger(cfg=self.cfg, entry_price=entry_price, atr_value=atr_value, direction=direction)
+        if lv is None:
             return
-        if atr_value is None or atr_value <= 0:
-            return
-        if self.cfg.sl_atr_mult is None or self.cfg.sl_atr_mult <= 0:
-            return
-        if self.cfg.tp_atr_mult is None or self.cfg.tp_atr_mult <= 0:
-            return
-
-        stop_dist = atr_value * self.cfg.sl_atr_mult
-        tp_dist = atr_value * self.cfg.tp_atr_mult
-        stop = entry_price - stop_dist if direction > 0 else entry_price + stop_dist
-        tp = entry_price + tp_dist if direction > 0 else entry_price - tp_dist
+        stop, tp = lv
 
         self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="entry_price", value=str(entry_price))
         self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price", value=str(stop))
@@ -429,7 +393,7 @@ class BollingerRsiRunner(BaseStrategy):
                     daily_loss_rub=daily_loss,
                     weekly_loss_rub=weekly_loss,
                     equity_rub=equity,
-                    risk_per_trade_pct_override=_norm_risk_pct(self.cfg.risk_per_trade_pct),
+                    risk_per_trade_pct_override=norm_risk_pct(self.cfg.risk_per_trade_pct),
                 )
                 if not decision.allowed or decision.intent is None:
                     self.store.set_job_decision(
