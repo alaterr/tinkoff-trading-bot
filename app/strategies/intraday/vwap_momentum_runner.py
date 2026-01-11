@@ -77,6 +77,7 @@ class VwapMomentumRunner(BaseStrategy):
             vwap_window=(int(p["vwap_window"]) if p.get("vwap_window") is not None else cfg0.vwap_window),
             ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
             ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
+            require_fast_slope=bool(p.get("require_fast_slope", cfg0.require_fast_slope)),
             trend_timeframe=(str(p["trend_timeframe"]) if p.get("trend_timeframe") is not None else cfg0.trend_timeframe),
             trend_ema_fast=int(p.get("trend_ema_fast", cfg0.trend_ema_fast)),
             trend_ema_slow=int(p.get("trend_ema_slow", cfg0.trend_ema_slow)),

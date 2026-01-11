@@ -1327,7 +1327,9 @@ INDEX_HTML = """<!doctype html>
           return {"timeframe":"1h","breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"2.0","atr_tp_mult":"3.0","atr_trail_mult":"1.5","trend_ema_fast":20,"trend_ema_slow":50,"risk_per_trade_pct":0.5,"volume_window":20,"min_volume_ratio":"1.2","trade_sessions":[["10:00","18:45"]],"exit_before_close_minutes":30,"days_before_expiry_to_roll":5};
         }
         if (strategy === 'intraday_vwap_momentum') {
-          return {"timeframe":"5min","vwap_period":105,"ema_fast":7,"ema_slow":31,"atr_period":19,"volume_window":35,"min_volume_ratio":"1.2","cooldown_bars":2,"exit_before_session_end_minutes":6,"sl_points":"30","tp_points":"160","trade_sessions":[["10:15","12:30"],["14:00","16:30"]],"trend_timeframe":null};
+          // Default preset: active but not too noisy.
+          // If you want more trades/day: set require_fast_slope=false and min_volume_ratio=1.0..1.1
+          return {"timeframe":"1min","vwap_window":60,"ema_fast":10,"ema_slow":30,"require_fast_slope":false,"trend_timeframe":"1h","trend_ema_fast":20,"trend_ema_slow":50,"atr_period":14,"atr_sl_mult":"1.5","atr_tp_mult":"3.0","atr_trail_mult":"1.0","risk_per_trade_pct":0.25,"volume_window":30,"min_volume_ratio":"1.1","cooldown_bars":5,"exit_before_session_end_minutes":10,"trade_sessions":[["10:15","12:30"],["14:00","16:30"]]};
         }
         if (strategy === 'intraday_bollinger_rsi') {
           return {"timeframe":"5min","bollinger_period":12,"bollinger_std_mult":"2.0","rsi_period":15,"rsi_overbought":"69","rsi_oversold":"31","atr_period":19,"sl_atr_mult":"1.6","tp_atr_mult":"1.1","risk_per_trade_pct":0.3,"volume_window":24,"min_volume_ratio":"1.1","trade_sessions":[["10:15","17:30"]],"cooldown_bars":1};
@@ -2728,6 +2730,7 @@ class UiServer:
             tick_size = f_spec.min_price_increment  # Decimal or None
             pm = f_spec.price_multiplier
             lot = Decimal(int(f_spec.lot or 1))
+            last_sizing: dict[str, str] = {}
 
             def _stop_risk_per_contract_rub(window) -> Optional[Decimal]:
                 # Fixed stop in points (interpreted as ticks if tick_size is known)
@@ -2763,9 +2766,25 @@ class UiServer:
                 if pos == 0 and sig.target_qty != 0 and abs(int(sig.target_qty)) == 1:
                     rs = _stop_risk_per_contract_rub(w)
                     if rs is not None and rs > 0 and risk_budget > 0:
-                        qty = int((risk_budget / rs).to_integral_value(rounding="ROUND_FLOOR"))
-                        qty = max(1, qty)
-                        qty = min(qty, max_pos) if max_pos > 0 else qty
+                        qty_raw = int((risk_budget / rs).to_integral_value(rounding="ROUND_FLOOR"))
+                        qty_raw = max(1, qty_raw)
+                        qty = min(qty_raw, max_pos) if max_pos > 0 else qty_raw
+                        last_sizing.clear()
+                        last_sizing.update(
+                            {
+                                "risk_pct": str(risk_frac),
+                                "risk_budget": str(risk_budget),
+                                "stop_risk_per_contract_rub": str(rs),
+                                "qty_raw": str(qty_raw),
+                                "qty_capped": str(qty),
+                                "max_position_qty": str(max_pos),
+                                "sl_points": str(vm_cfg.sl_points) if vm_cfg.sl_points is not None else "",
+                                "atr_sl_mult": str(vm_cfg.atr_sl_mult) if vm_cfg.atr_sl_mult is not None else "",
+                                "tick_size": str(tick_size) if tick_size is not None else "",
+                                "price_multiplier": str(pm),
+                                "lot": str(lot),
+                            }
+                        )
                         from core.models.entities import Signal as CoreSignal
 
                         return CoreSignal(
@@ -2938,6 +2957,7 @@ class UiServer:
                         "trend_candles": len(trend_ts) if trend_ts else 0,
                         "raw_entry_signals_pos0": raw_entries,
                         "filters": diag,
+                        "last_sizing": last_sizing,
                     },
                     "trades": [t.__dict__ for t in res.trades[-200:]],
                     "equity": [p.__dict__ for p in res.equity[-2000:]],

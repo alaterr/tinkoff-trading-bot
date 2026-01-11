@@ -8,10 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional
 
-from app.client import client as broker_client
-from app.instruments_config.parser import get_instruments
 from core.backtest.engine import BacktestConfig, run_backtest_target_qty
-from core.data.candles import CandleRepository
 from core.models.entities import Candle
 from reports.stats import summarize
 from reports.trade_log import write_equity_csv, write_summary_json, write_trades_csv
@@ -104,9 +101,18 @@ def main():
         default=None,
         help="Путь к файлу свечей (CSV/JSONL), выгруженному из UI. Если задан — свечи берём из файла, без API.",
     )
+    ap.add_argument(
+        "--strategy",
+        default=None,
+        help="Имя стратегии (например intraday_vwap_momentum). Если не задано при --candles-file, попробуем угадать по имени файла.",
+    )
+    ap.add_argument(
+        "--params-json",
+        default=None,
+        help="JSON со стратегическими параметрами (перекрывает параметры из instruments_config.json). Удобно для офлайн-прогона.",
+    )
     args = ap.parse_args()
 
-    cfg = get_instruments(args.config)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -115,13 +121,137 @@ def main():
 
     async def _run():
         candles_from_file: Optional[List[Candle]] = None
+        params_override: Optional[dict] = None
+        if args.params_json:
+            try:
+                params_override = json.loads(args.params_json)
+            except Exception as e:  # noqa: BLE001
+                raise SystemExit(f"--params-json должен быть валидным JSON: {e}")
+
         if args.candles_file:
             if not args.figi:
                 raise SystemExit("--figi обязателен при использовании --candles-file")
             candles_from_file = _load_candles_file(Path(args.candles_file), figi_fallback=str(args.figi))
         else:
+            # Heavy imports only when broker download is needed.
+            from app.client import client as broker_client
+            from core.data.candles import CandleRepository
+
             await broker_client.ainit()
             repo = CandleRepository(broker=broker_client)
+
+        # Resolve strategy+params:
+        # - If candles-file mode and --strategy provided: use that.
+        # - If candles-file mode and --strategy not provided: infer from filename.
+        # - Otherwise: load instruments_config.json (requires pydantic installed).
+        if candles_from_file is not None:
+            if not args.strategy:
+                name = str(args.candles_file).lower()
+                if "intraday_vwap_momentum" in name:
+                    sname = "intraday_vwap_momentum"
+                elif "intraday_bollinger_rsi" in name:
+                    sname = "intraday_bollinger_rsi"
+                else:
+                    raise SystemExit("--strategy обязателен (не удалось угадать по имени файла)")
+            else:
+                sname = str(args.strategy).strip()
+
+            candles = list(candles_from_file)
+            to = _parse_dt(args.to_dt) if args.to_dt else (candles[-1].time if candles else datetime.now(timezone.utc))
+            if args.from_dt:
+                from_ts = _parse_dt(args.from_dt)
+                candles = [c for c in candles if c.time >= from_ts]
+            if args.to_dt:
+                candles = [c for c in candles if c.time <= to]
+            if not candles:
+                raise SystemExit("Нет свечей после фильтрации диапазона (--from/--to)")
+
+            # Parameters: override -> defaults
+            if sname == "intraday_vwap_momentum":
+                p = dict(params_override or {})
+                cfg0 = VwapMomentumConfig()
+                vm_cfg = VwapMomentumConfig(
+                    timeframe=str(p.get("timeframe", cfg0.timeframe)),
+                    vwap_period=int(p.get("vwap_period", cfg0.vwap_period)),
+                    vwap_window=(int(p["vwap_window"]) if p.get("vwap_window") is not None else cfg0.vwap_window),
+                    ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
+                    ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
+                    require_fast_slope=bool(p.get("require_fast_slope", cfg0.require_fast_slope)),
+                    trend_timeframe=(str(p["trend_timeframe"]) if p.get("trend_timeframe") is not None else cfg0.trend_timeframe),
+                    trend_ema_fast=int(p.get("trend_ema_fast", cfg0.trend_ema_fast)),
+                    trend_ema_slow=int(p.get("trend_ema_slow", cfg0.trend_ema_slow)),
+                    atr_period=int(p.get("atr_period", cfg0.atr_period)),
+                    sl_points=_to_decimal(p.get("sl_points", cfg0.sl_points)),
+                    tp_points=_to_decimal(p.get("tp_points", cfg0.tp_points)),
+                    atr_sl_mult=_to_decimal(p.get("atr_sl_mult", cfg0.atr_sl_mult)),
+                    atr_tp_mult=_to_decimal(p.get("atr_tp_mult", cfg0.atr_tp_mult)),
+                    atr_trail_mult=_to_decimal(p.get("atr_trail_mult", cfg0.atr_trail_mult)),
+                    risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct)) or cfg0.risk_per_trade_pct,
+                    volume_window=int(p.get("volume_window", cfg0.volume_window)),
+                    min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
+                    trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
+                    cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
+                    exit_before_session_end_minutes=int(
+                        p.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)
+                    ),
+                )
+                st = VwapMomentumStrategy(figi=str(args.figi), config=vm_cfg)
+                # Offline mode: no higher-timeframe candles here, so pass 0 (disabled).
+                sig_fn = lambda w, pos: st.generate_signal(
+                    candles=w, current_position_qty=pos, trend_direction=0, strategy_name=sname
+                )
+            elif sname == "intraday_bollinger_rsi":
+                p = dict(params_override or {})
+                cfg0 = BollingerRsiConfig()
+                br_cfg = BollingerRsiConfig(
+                    timeframe=str(p.get("timeframe", cfg0.timeframe)),
+                    bollinger_period=int(p.get("bollinger_period", cfg0.bollinger_period)),
+                    bollinger_std_mult=_to_decimal(p.get("bollinger_std_mult", cfg0.bollinger_std_mult))
+                    or cfg0.bollinger_std_mult,
+                    rsi_period=int(p.get("rsi_period", cfg0.rsi_period)),
+                    rsi_overbought=_to_decimal(p.get("rsi_overbought", cfg0.rsi_overbought)) or cfg0.rsi_overbought,
+                    rsi_oversold=_to_decimal(p.get("rsi_oversold", cfg0.rsi_oversold)) or cfg0.rsi_oversold,
+                    atr_period=int(p.get("atr_period", cfg0.atr_period)),
+                    sl_atr_mult=_to_decimal(p.get("sl_atr_mult", cfg0.sl_atr_mult)) or cfg0.sl_atr_mult,
+                    tp_atr_mult=_to_decimal(p.get("tp_atr_mult", cfg0.tp_atr_mult)) or cfg0.tp_atr_mult,
+                    risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct))
+                    or cfg0.risk_per_trade_pct,
+                    volume_window=int(p.get("volume_window", cfg0.volume_window)),
+                    min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio))
+                    or cfg0.min_volume_ratio,
+                    trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
+                    cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
+                )
+                st = BollingerRsiStrategy(figi=str(args.figi), config=br_cfg)
+                sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, strategy_name=sname)
+            else:
+                raise SystemExit(f"Стратегия '{sname}' пока не поддерживается в офлайн-режиме tools/backtest.py")
+
+            bt_cfg = BacktestConfig(
+                initial_equity=Decimal(str(args.initial_equity)),
+            )
+            result = run_backtest_target_qty(
+                figi=str(args.figi),
+                strategy_name=sname,
+                candles=candles,
+                signal_fn=sig_fn,
+                cfg=bt_cfg,
+            )
+            summary = summarize(result.trades, result.equity)
+            prefix = out_dir / f"{sname}_{args.figi}_offline"
+            write_trades_csv(prefix.with_suffix(".trades.csv"), result.trades)
+            write_equity_csv(prefix.with_suffix(".equity.csv"), result.equity)
+            write_summary_json(prefix.with_suffix(".summary.json"), summary)
+            print(
+                f"{sname} {args.figi}: trades={summary.trades} pnl={summary.total_pnl} "
+                f"mdd={summary.max_drawdown} winrate={summary.winrate:.2%}"
+            )
+            return
+
+        # Online/config mode below (requires pydantic installed)
+        from app.instruments_config.parser import get_instruments
+
+        cfg = get_instruments(args.config)
 
         for inst in cfg.instruments:
             if args.figi and inst.figi != args.figi:
@@ -134,29 +264,20 @@ def main():
             # Fetch candles (uses sdk history cache if enabled in app settings)
             # For deterministic runs, user should freeze a time interval by --to.
             to = _parse_dt(args.to_dt) if args.to_dt else datetime.now(timezone.utc)
-            if candles_from_file is not None:
-                candles = list(candles_from_file)
-                # Optional time window filter
+            if sname in {"intraday_vwap_momentum", "intraday_bollinger_rsi"}:
+                tf = str(inst.strategy.parameters.get("timeframe", "1min"))
                 if args.from_dt:
                     from_ts = _parse_dt(args.from_dt)
-                    candles = [c for c in candles if c.time >= from_ts]
-                if args.to_dt:
-                    candles = [c for c in candles if c.time <= to]
-            else:
-                if sname in {"intraday_vwap_momentum", "intraday_bollinger_rsi"}:
-                    tf = str(inst.strategy.parameters.get("timeframe", "1min"))
-                    if args.from_dt:
-                        from_ts = _parse_dt(args.from_dt)
-                        candles = await repo.fetch_intraday_range(figi=inst.figi, from_ts=from_ts, to_ts=to, timeframe=tf)
-                    else:
-                        # best-effort: last ~2-5 trading days depending on tf
-                        candles_n = 3000 if tf.lower().strip() == "1min" else 1200
-                        res = await repo.fetch_last_intraday(figi=inst.figi, n=candles_n, timeframe=tf, to=to)
-                        candles = res.candles
+                    candles = await repo.fetch_intraday_range(figi=inst.figi, from_ts=from_ts, to_ts=to, timeframe=tf)
                 else:
-                    candles_n = 400  # enough for D1 indicators
-                    res = await repo.fetch_last_d1(figi=inst.figi, n=candles_n, to=to)
+                    # best-effort: last ~2-5 trading days depending on tf
+                    candles_n = 3000 if tf.lower().strip() == "1min" else 1200
+                    res = await repo.fetch_last_intraday(figi=inst.figi, n=candles_n, timeframe=tf, to=to)
                     candles = res.candles
+            else:
+                candles_n = 400  # enough for D1 indicators
+                res = await repo.fetch_last_d1(figi=inst.figi, n=candles_n, to=to)
+                candles = res.candles
             if not candles:
                 continue
 

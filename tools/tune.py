@@ -230,6 +230,9 @@ def _trend_dir_mapper(trend: List[Candle], *, ema_fast: int, ema_slow: int):
 def _eval_intraday_bollinger_rsi(candles: List[Candle], params: Dict[str, Any]) -> Dict[str, Any]:
     from app.strategies.intraday.bollinger_rsi import BollingerRsiConfig, BollingerRsiStrategy, _to_decimal as br_dec
 
+    # Universal sessions: full day (do not tune per dataset).
+    full_day_sessions = (("00:00", "23:59"),)
+
     cfg0 = BollingerRsiConfig()
     cfg = BollingerRsiConfig(
         timeframe=str(params.get("timeframe", cfg0.timeframe)),
@@ -244,7 +247,7 @@ def _eval_intraday_bollinger_rsi(candles: List[Candle], params: Dict[str, Any]) 
         risk_per_trade_pct=br_dec(params.get("risk_per_trade_pct", cfg0.risk_per_trade_pct)) or cfg0.risk_per_trade_pct,
         volume_window=int(params.get("volume_window", cfg0.volume_window)),
         min_volume_ratio=br_dec(params.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
-        trade_sessions=tuple(tuple(x) for x in (params.get("trade_sessions") or cfg0.trade_sessions)),
+        trade_sessions=full_day_sessions,
         cooldown_bars=int(params.get("cooldown_bars", cfg0.cooldown_bars)),
     )
     st = BollingerRsiStrategy(figi=candles[0].figi if candles else "", config=cfg)
@@ -270,6 +273,9 @@ def _eval_intraday_vwap_momentum(
 ) -> Dict[str, Any]:
     from app.strategies.intraday.vwap_momentum import VwapMomentumConfig, VwapMomentumStrategy, _to_decimal as vm_dec
 
+    # Universal sessions: full day (do not tune per dataset).
+    full_day_sessions = (("00:00", "23:59"),)
+
     cfg0 = VwapMomentumConfig()
     cfg = VwapMomentumConfig(
         timeframe=str(params.get("timeframe", cfg0.timeframe)),
@@ -289,7 +295,7 @@ def _eval_intraday_vwap_momentum(
         risk_per_trade_pct=vm_dec(params.get("risk_per_trade_pct", cfg0.risk_per_trade_pct)) or cfg0.risk_per_trade_pct,
         volume_window=int(params.get("volume_window", cfg0.volume_window)),
         min_volume_ratio=vm_dec(params.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
-        trade_sessions=tuple(tuple(x) for x in (params.get("trade_sessions") or cfg0.trade_sessions)),
+        trade_sessions=full_day_sessions,
         cooldown_bars=int(params.get("cooldown_bars", cfg0.cooldown_bars)),
         exit_before_session_end_minutes=int(params.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)),
     )
