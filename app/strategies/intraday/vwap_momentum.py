@@ -9,7 +9,7 @@ from typing import List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 from app.strategies.indicators import average_volume, vwap_close
-from app.strategies.positional.indicators import atr, ema
+from app.strategies.positional.indicators import atr, ema, true_range
 from core.models.entities import Candle, Signal, SignalType
 
 
@@ -59,6 +59,12 @@ class VwapMomentumConfig:
     exit_confirm_bars: int = 2
     # - exit_on_vwap_cross: exit if price crosses VWAP against the position (often reduces drawdowns)
     exit_on_vwap_cross: bool = True
+
+    # Quality filters to reduce losing trades:
+    # Require entry candle impulse: TrueRange(last, prev) >= min_impulse_atr_mult * ATR
+    min_impulse_atr_mult: Decimal = Decimal("0")
+    # Require close be far enough from VWAP: abs(close - VWAP) >= min_vwap_dist_atr_mult * ATR
+    min_vwap_dist_atr_mult: Decimal = Decimal("0")
 
 
 def _to_decimal(v) -> Optional[Decimal]:
@@ -357,6 +363,27 @@ class VwapMomentumStrategy:
                 (cross_down if mode in {"cross", "cross_or_retest"} else False)
                 or (retest_down if mode in {"retest", "cross_or_retest"} else False)
             )
+
+            # Extra quality filters (ATR-based), applied only for entries
+            if (long_entry or short_entry) and a is not None and a > 0:
+                try:
+                    imp_mult = Decimal(str(self.cfg.min_impulse_atr_mult))
+                except Exception:  # noqa: BLE001
+                    imp_mult = Decimal("0")
+                try:
+                    dist_mult = Decimal(str(self.cfg.min_vwap_dist_atr_mult))
+                except Exception:  # noqa: BLE001
+                    dist_mult = Decimal("0")
+
+                if imp_mult > 0:
+                    tr = true_range(last, prev)
+                    if tr < (a * imp_mult):
+                        long_entry = False
+                        short_entry = False
+                if dist_mult > 0 and (long_entry or short_entry):
+                    if abs(last.close - vwap_now) < (a * dist_mult):
+                        long_entry = False
+                        short_entry = False
 
             if long_entry:
                 return Signal(
