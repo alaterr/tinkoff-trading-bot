@@ -1186,7 +1186,7 @@ INDEX_HTML = """<!doctype html>
           return {"timeframe":"1h","breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"2.0","atr_tp_mult":"3.0","atr_trail_mult":"1.5","trend_ema_fast":20,"trend_ema_slow":50,"risk_per_trade_pct":0.5,"volume_window":20,"min_volume_ratio":"1.2","trade_sessions":[["10:00","18:45"]],"exit_before_close_minutes":30,"days_before_expiry_to_roll":5};
         }
         if (strategy === 'intraday_vwap_momentum') {
-          return {"timeframe":"1min","vwap_period":30,"ema_fast":5,"ema_slow":20,"atr_period":14,"sl_points":50,"tp_points":100,"risk_per_trade_pct":0.3,"volume_window":20,"min_volume_ratio":1.5,"trade_sessions":[["10:00","17:00"]],"cooldown_bars":3,"exit_before_session_end_minutes":5};
+          return {"timeframe":"5min","vwap_window":60,"ema_fast":12,"ema_slow":36,"trend_timeframe":"1h","trend_ema_fast":20,"trend_ema_slow":50,"atr_period":14,"atr_sl_mult":"1.5","atr_tp_mult":"3.0","atr_trail_mult":"1.0","risk_per_trade_pct":0.25,"volume_window":50,"min_volume_ratio":1.7,"trade_sessions":[["10:15","12:30"],["14:00","16:30"]],"cooldown_bars":7,"exit_before_session_end_minutes":10};
         }
         // donchian_atr
         return {"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1};
@@ -1263,7 +1263,7 @@ INDEX_HTML = """<!doctype html>
             'Intraday VWAP Momentum (1m/5m, 10–20 сделок/день)',
             '',
             'Идея: ловить импульсы по направлению локального тренда.',
-            'Фильтры: VWAP + EMA(fast/slow) + объём + торговая сессия (MSK).',
+            'Фильтры: VWAP + EMA(fast/slow) + объём + торговая сессия (MSK) + старший тренд (1h/4h EMA).',
             '',
             'Лонг (вход только из 0):',
             '- Close пересекает VWAP снизу вверх',
@@ -1274,6 +1274,7 @@ INDEX_HTML = """<!doctype html>
             '',
             'Выход:',
             '- SL/TP (контроль по закрытию свечи, уровни выставляет раннер)',
+            '- опционально: трейлинг-стоп по ATR (atr_trail_mult)',
             '- ранний выход: EMA_fast пересекла EMA_slow в обратную сторону',
             '- выход за exit_before_session_end_minutes до конца торгового окна',
             '',
@@ -1282,10 +1283,12 @@ INDEX_HTML = """<!doctype html>
             '',
             'Параметры:',
             '- timeframe: "1min" или "5min"',
-            '- vwap_period: окно VWAP (в минутах)',
+            '- vwap_window: окно VWAP (в барах, предпочтительно для 5min) или vwap_period (в минутах, legacy)',
             '- ema_fast / ema_slow',
+            '- trend_timeframe ("1h"/"4h") + trend_ema_fast / trend_ema_slow: фильтр старшего тренда',
             '- sl_points / tp_points (в тиках, если тик известен; иначе в “ценовых пунктах”)',
             '- atr_sl_mult / atr_tp_mult (альтернатива фиксированным SL/TP)',
+            '- atr_trail_mult: трейлинг стоп по ATR (опционально)',
             '- risk_per_trade_pct',
             '- volume_window / min_volume_ratio',
             '- trade_sessions (MSK), cooldown_bars',
@@ -1981,13 +1984,18 @@ class UiServer:
             vm_cfg = VwapMomentumConfig(
                 timeframe=str(p.get("timeframe", cfg0.timeframe)),
                 vwap_period=int(p.get("vwap_period", cfg0.vwap_period)),
+                vwap_window=(int(p["vwap_window"]) if p.get("vwap_window") is not None else cfg0.vwap_window),
                 ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
                 ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
+                trend_timeframe=(str(p["trend_timeframe"]) if p.get("trend_timeframe") is not None else cfg0.trend_timeframe),
+                trend_ema_fast=int(p.get("trend_ema_fast", cfg0.trend_ema_fast)),
+                trend_ema_slow=int(p.get("trend_ema_slow", cfg0.trend_ema_slow)),
                 atr_period=int(p.get("atr_period", cfg0.atr_period)),
                 sl_points=_to_decimal(p.get("sl_points", cfg0.sl_points)),
                 tp_points=_to_decimal(p.get("tp_points", cfg0.tp_points)),
                 atr_sl_mult=_to_decimal(p.get("atr_sl_mult", cfg0.atr_sl_mult)),
                 atr_tp_mult=_to_decimal(p.get("atr_tp_mult", cfg0.atr_tp_mult)),
+                atr_trail_mult=_to_decimal(p.get("atr_trail_mult", cfg0.atr_trail_mult)),
                 risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct))
                 or cfg0.risk_per_trade_pct,
                 volume_window=int(p.get("volume_window", cfg0.volume_window)),
@@ -1999,6 +2007,59 @@ class UiServer:
                 ),
             )
             st = VwapMomentumStrategy(figi=figi, config=vm_cfg)
+
+            # Higher timeframe trend filter (optional): compute trend_dir for each bar timestamp.
+            trend_ts: list[datetime] = []
+            trend_close: list[Decimal] = []
+            trend_ef: list[Decimal] = []
+            trend_es: list[Decimal] = []
+            trend_j = 0  # pointer used in sig_fn (monotonic in backtest loop)
+
+            tf_trend = str(vm_cfg.trend_timeframe or "").lower().strip()
+            if tf_trend in {"1h", "4h"}:
+                # Padding for EMA calculation
+                hours_per_bar = 1 if tf_trend == "1h" else 4
+                pad_hours = max(48, (int(vm_cfg.trend_ema_slow) + 10) * hours_per_bar)
+                trend_from = from_ts - timedelta(hours=pad_hours)
+                try:
+                    candles_trend_all = await asyncio.wait_for(
+                        repo.fetch_intraday_range(figi=figi, from_ts=trend_from, to_ts=to_ts, timeframe=tf_trend),
+                        timeout=60,
+                    )
+                except Exception:  # noqa: BLE001
+                    candles_trend_all = []
+
+                if candles_trend_all:
+                    trend_ts = [c.time for c in candles_trend_all]
+                    trend_close = [c.close for c in candles_trend_all]
+                    try:
+                        from app.strategies.positional.indicators import ema
+
+                        trend_ef = ema(trend_close, int(vm_cfg.trend_ema_fast))
+                        trend_es = ema(trend_close, int(vm_cfg.trend_ema_slow))
+                    except Exception:  # noqa: BLE001
+                        trend_ef = []
+                        trend_es = []
+
+            def _trend_dir_for_ts(ts: datetime) -> int:
+                nonlocal trend_j
+                if not trend_ts or not trend_close or not trend_ef or not trend_es:
+                    return 0
+                # Advance pointer while we have trend bars <= ts
+                while (trend_j + 1) < len(trend_ts) and trend_ts[trend_j + 1] <= ts:
+                    trend_j += 1
+                if trend_j < 0 or trend_j >= len(trend_ts):
+                    return 0
+                if trend_j >= len(trend_close) or trend_j >= len(trend_ef) or trend_j >= len(trend_es):
+                    return 0
+                c = trend_close[trend_j]
+                ef = trend_ef[trend_j]
+                es = trend_es[trend_j]
+                if c > es and ef > es:
+                    return 1
+                if c < es and ef < es:
+                    return -1
+                return 0
 
             # Risk-based sizing for dry-run:
             # Strategy emits target_qty = +/-1 as direction; here we scale it to contracts using:
@@ -2040,7 +2101,13 @@ class UiServer:
                 return None
 
             def sig_fn(w, pos):
-                sig = st.generate_signal(candles=w, current_position_qty=pos, strategy_name=strat.value)
+                td = _trend_dir_for_ts(w[-1].time) if w else 0
+                sig = st.generate_signal(
+                    candles=w,
+                    current_position_qty=pos,
+                    trend_direction=td,
+                    strategy_name=strat.value,
+                )
                 if sig is None:
                     return None
                 # Only size entries; exits keep 0

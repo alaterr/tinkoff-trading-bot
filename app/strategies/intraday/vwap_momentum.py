@@ -16,9 +16,17 @@ from core.models.entities import Candle, Signal, SignalType
 @dataclass(frozen=True)
 class VwapMomentumConfig:
     timeframe: str = "1min"  # "1min" | "5min"
+    # VWAP window:
+    # - vwap_period: minutes (backward-compatible, default)
+    # - vwap_window: bars (preferred for 5m setup). If set, it overrides vwap_period.
     vwap_period: int = 30  # minutes
+    vwap_window: Optional[int] = None  # bars
     ema_fast: int = 5
     ema_slow: int = 20
+    # Higher timeframe trend filter (optional)
+    trend_timeframe: Optional[str] = None  # "1h" | "4h" | None
+    trend_ema_fast: int = 20
+    trend_ema_slow: int = 50
     atr_period: int = 14
     # fixed SL/TP in "points" (interpreted as ticks by runner)
     sl_points: Optional[Decimal] = Decimal("50")
@@ -26,6 +34,8 @@ class VwapMomentumConfig:
     # ATR-based SL/TP alternative
     atr_sl_mult: Optional[Decimal] = None
     atr_tp_mult: Optional[Decimal] = None
+    # ATR trailing stop (optional). If set > 0, runner will trail stop by atr_trail_mult * ATR.
+    atr_trail_mult: Optional[Decimal] = None
     # risk per trade (0.3 => 0.3% or 0.003 => 0.3%)
     risk_per_trade_pct: Decimal = Decimal("0.3")
     volume_window: int = 20
@@ -72,8 +82,33 @@ class VwapMomentumStrategy:
         raise ValueError("timeframe must be '1min' or '5min'")
 
     def _vwap_bars(self) -> int:
+        if self.cfg.vwap_window is not None:
+            return max(1, int(self.cfg.vwap_window))
         bm = self._bar_minutes()
         return max(1, int(math.ceil(int(self.cfg.vwap_period) / bm)))
+
+    @staticmethod
+    def trend_dir_from_candles(*, candles: List[Candle], ema_fast_p: int, ema_slow_p: int) -> int:
+        """
+        +1 bull, -1 bear, 0 unknown.
+        Bull if close > EMA_slow and EMA_fast > EMA_slow; bear if close < EMA_slow and EMA_fast < EMA_slow.
+        """
+        if not candles:
+            return 0
+        need = max(int(ema_fast_p), int(ema_slow_p)) + 2
+        if len(candles) < need:
+            return 0
+        closes = [c.close for c in candles]
+        ef = ema(closes, int(ema_fast_p))
+        es = ema(closes, int(ema_slow_p))
+        if not ef or not es:
+            return 0
+        last_close = closes[-1]
+        if last_close > es[-1] and ef[-1] > es[-1]:
+            return 1
+        if last_close < es[-1] and ef[-1] < es[-1]:
+            return -1
+        return 0
 
     def _in_trade_session(self, ts: datetime) -> bool:
         try:
@@ -121,6 +156,7 @@ class VwapMomentumStrategy:
         *,
         candles: List[Candle],
         current_position_qty: int,
+        trend_direction: int = 0,
         strategy_name: str = "intraday_vwap_momentum",
     ) -> Optional[Signal]:
         if not candles:
@@ -232,7 +268,7 @@ class VwapMomentumStrategy:
             fast_up = fast_now > fast_prev
             fast_down = fast_now < fast_prev
 
-            if long_bias and cross_up and fast_up:
+            if long_bias and cross_up and fast_up and (trend_direction in (0, 1)):
                 return Signal(
                     strategy_name=strategy_name,
                     figi=self.figi,
@@ -245,7 +281,7 @@ class VwapMomentumStrategy:
                     sl_points=_to_decimal(self.cfg.sl_points),
                     tp_points=_to_decimal(self.cfg.tp_points),
                 )
-            if short_bias and cross_down and fast_down:
+            if short_bias and cross_down and fast_down and (trend_direction in (0, -1)):
                 return Signal(
                     strategy_name=strategy_name,
                     figi=self.figi,

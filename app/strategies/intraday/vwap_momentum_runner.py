@@ -74,13 +74,18 @@ class VwapMomentumRunner(BaseStrategy):
         self.cfg = VwapMomentumConfig(
             timeframe=str(p.get("timeframe", cfg0.timeframe)),
             vwap_period=int(p.get("vwap_period", cfg0.vwap_period)),
+            vwap_window=(int(p["vwap_window"]) if p.get("vwap_window") is not None else cfg0.vwap_window),
             ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
             ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
+            trend_timeframe=(str(p["trend_timeframe"]) if p.get("trend_timeframe") is not None else cfg0.trend_timeframe),
+            trend_ema_fast=int(p.get("trend_ema_fast", cfg0.trend_ema_fast)),
+            trend_ema_slow=int(p.get("trend_ema_slow", cfg0.trend_ema_slow)),
             atr_period=int(p.get("atr_period", cfg0.atr_period)),
             sl_points=_to_decimal(p.get("sl_points", cfg0.sl_points)),
             tp_points=_to_decimal(p.get("tp_points", cfg0.tp_points)),
             atr_sl_mult=_to_decimal(p.get("atr_sl_mult", cfg0.atr_sl_mult)),
             atr_tp_mult=_to_decimal(p.get("atr_tp_mult", cfg0.atr_tp_mult)),
+            atr_trail_mult=_to_decimal(p.get("atr_trail_mult", cfg0.atr_trail_mult)),
             risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct)) or cfg0.risk_per_trade_pct,
             volume_window=int(p.get("volume_window", cfg0.volume_window)),
             min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
@@ -105,9 +110,13 @@ class VwapMomentumRunner(BaseStrategy):
         self.strategy = VwapMomentumStrategy(figi=figi, config=self.cfg)
 
         # Lookback for indicators
-        bm = 1 if self.cfg.timeframe.lower().strip() == "1min" else 5
-        vwap_bars = max(1, int((int(self.cfg.vwap_period) + bm - 1) // bm))
+        if self.cfg.vwap_window is not None:
+            vwap_bars = int(self.cfg.vwap_window)
+        else:
+            bm = 1 if self.cfg.timeframe.lower().strip() == "1min" else 5
+            vwap_bars = max(1, int((int(self.cfg.vwap_period) + bm - 1) // bm))
         self.lookback = max(vwap_bars, self.cfg.ema_slow, self.cfg.atr_period, self.cfg.volume_window) + 10
+        self._trend_lookback = max(self.cfg.trend_ema_fast, self.cfg.trend_ema_slow) + 10
 
     def _job_id(self) -> str:
         return f"{self.figi}|{self.strategy_name}"
@@ -293,11 +302,66 @@ class VwapMomentumRunner(BaseStrategy):
         self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="entry_price", value=str(entry_price))
         self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price", value=str(stop))
         self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="tp_price", value=str(tp))
+        if direction > 0:
+            self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="peak_price", value=str(entry_price))
+            self.store.delete_kv(strategy_name=self.strategy_name, figi=self.figi, key="trough_price")
+        else:
+            self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="trough_price", value=str(entry_price))
+            self.store.delete_kv(strategy_name=self.strategy_name, figi=self.figi, key="peak_price")
 
     def _clear_levels(self) -> None:
-        for k in ("entry_price", "stop_price", "tp_price"):
+        for k in ("entry_price", "stop_price", "tp_price", "peak_price", "trough_price"):
             self.store.delete_kv(strategy_name=self.strategy_name, figi=self.figi, key=k)
 
+    def _update_trailing_stop(self, *, current_qty: int, last_close: Decimal, atr_value: Optional[Decimal]) -> None:
+        """
+        ATR trailing stop (close-based updates, deterministic):
+        - long: peak = max(peak, close); trail = peak - atr_trail_mult*ATR; stop = max(stop, trail)
+        - short: trough = min(trough, close); trail = trough + atr_trail_mult*ATR; stop = min(stop, trail)
+        """
+        if current_qty == 0:
+            return
+        if self.cfg.atr_trail_mult is None or self.cfg.atr_trail_mult <= 0:
+            return
+        if atr_value is None or atr_value <= 0:
+            return
+
+        stop_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price")
+        stop = _to_decimal(stop_s)
+        dist = atr_value * self.cfg.atr_trail_mult
+        if current_qty > 0:
+            peak_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="peak_price")
+            peak = _to_decimal(peak_s) or last_close
+            peak = max(peak, last_close)
+            self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="peak_price", value=str(peak))
+            trail = peak - dist
+            if stop is None or trail > stop:
+                self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price", value=str(trail))
+        else:
+            trough_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="trough_price")
+            trough = _to_decimal(trough_s) or last_close
+            trough = min(trough, last_close)
+            self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="trough_price", value=str(trough))
+            trail = trough + dist
+            if stop is None or trail < stop:
+                self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="stop_price", value=str(trail))
+
+    async def _get_trend_direction(self) -> int:
+        """
+        Optional higher timeframe trend filter (1h/4h EMA).
+        Returns +1/-1/0.
+        """
+        tf = (self.cfg.trend_timeframe or "").lower().strip()
+        if tf not in {"1h", "4h"}:
+            return 0
+        res = await self.data.fetch_last_intraday(figi=self.figi, n=self._trend_lookback, timeframe=tf)
+        if not res.candles:
+            return 0
+        return VwapMomentumStrategy.trend_dir_from_candles(
+            candles=res.candles,
+            ema_fast_p=int(self.cfg.trend_ema_fast),
+            ema_slow_p=int(self.cfg.trend_ema_slow),
+        )
     def _maybe_exit_by_levels(self, *, current_qty: int, close: Decimal) -> bool:
         if current_qty == 0:
             return False
@@ -387,6 +451,7 @@ class VwapMomentumRunner(BaseStrategy):
 
                 # 1) Exit by stored SL/TP levels (close-based)
                 sig: Optional[Signal] = None
+                # Trailing stop update (best-effort). We'll use ATR from strategy signal if available.
                 if current_qty != 0 and self._maybe_exit_by_levels(current_qty=current_qty, close=last.close):
                     sig = Signal(
                         strategy_name=self.strategy_name,
@@ -402,11 +467,32 @@ class VwapMomentumRunner(BaseStrategy):
 
                 # 2) Strategy signal (entry/ema exit/session exit)
                 if sig is None:
+                    trend_dir = await self._get_trend_direction()
                     sig = self.strategy.generate_signal(
                         candles=res.candles,
                         current_position_qty=current_qty,
+                        trend_direction=trend_dir,
                         strategy_name=self.strategy_name,
                     )
+                    # If in position, update trailing stop using ATR computed by strategy.
+                    if current_qty != 0:
+                        try:
+                            self._update_trailing_stop(current_qty=current_qty, last_close=last.close, atr_value=getattr(sig, "atr", None))
+                        except Exception:  # noqa: BLE001
+                            pass
+                        # If trailing moved stop beyond close, exit on this bar close (deterministic).
+                        if self._maybe_exit_by_levels(current_qty=current_qty, close=last.close):
+                            sig = Signal(
+                                strategy_name=self.strategy_name,
+                                figi=self.figi,
+                                ts=last.time,
+                                signal_type=SignalType.TARGET_QTY,
+                                target_qty=0,
+                                reason="exit: SL/TP hit after trailing update (close-based)",
+                                risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
+                                sl_points=_to_decimal(self.cfg.sl_points),
+                                tp_points=_to_decimal(self.cfg.tp_points),
+                            )
 
                 if sig is None:
                     self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="last_bar_ts", value=last.time.isoformat())
