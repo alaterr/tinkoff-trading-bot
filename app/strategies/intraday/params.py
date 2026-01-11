@@ -65,9 +65,17 @@ def parse_vwap_momentum_config(strategy_params: dict[str, Any] | None) -> VwapMo
         exit_before_session_end_minutes=int(p.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)),
         exit_confirm_bars=int(p.get("exit_confirm_bars", cfg0.exit_confirm_bars)),
         exit_on_vwap_cross=bool(p.get("exit_on_vwap_cross", cfg0.exit_on_vwap_cross)),
+        max_hold_bars=int(p.get("max_hold_bars", cfg0.max_hold_bars)),
+        atr_regime_period=int(p.get("atr_regime_period", cfg0.atr_regime_period)),
+        atr_regime_min_ratio=_vm_to_decimal(p.get("atr_regime_min_ratio", cfg0.atr_regime_min_ratio))
+        or cfg0.atr_regime_min_ratio,
+        atr_regime_max_ratio=_vm_to_decimal(p.get("atr_regime_max_ratio", cfg0.atr_regime_max_ratio))
+        or cfg0.atr_regime_max_ratio,
         min_impulse_atr_mult=_vm_to_decimal(p.get("min_impulse_atr_mult", cfg0.min_impulse_atr_mult))
         or cfg0.min_impulse_atr_mult,
         min_vwap_dist_atr_mult=_vm_to_decimal(p.get("min_vwap_dist_atr_mult", cfg0.min_vwap_dist_atr_mult))
         or cfg0.min_vwap_dist_atr_mult,
+        retest_touch_atr_mult=_vm_to_decimal(p.get("retest_touch_atr_mult", cfg0.retest_touch_atr_mult))
+        or cfg0.retest_touch_atr_mult,
     )
 

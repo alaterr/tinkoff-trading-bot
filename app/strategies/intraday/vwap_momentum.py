@@ -34,6 +34,9 @@ class VwapMomentumConfig:
     retest_lookback: int = 10
     # Optional: require a micro-breakout on retest (close > prev.high for long / close < prev.low for short)
     require_retest_breakout: bool = True
+    # Retest strictness: require last.low/last.high to touch VWAP within ATR band.
+    # Set to 0 to disable and use only lookback condition.
+    retest_touch_atr_mult: Decimal = Decimal("0.15")
     # Higher timeframe trend filter (optional)
     trend_timeframe: Optional[str] = None  # "1h" | "4h" | None
     trend_ema_fast: int = 20
@@ -59,6 +62,15 @@ class VwapMomentumConfig:
     exit_confirm_bars: int = 2
     # - exit_on_vwap_cross: exit if price crosses VWAP against the position (often reduces drawdowns)
     exit_on_vwap_cross: bool = True
+    # Time-stop: if position hasn't reached TP/SL and we held too long, exit (prevents bleed in chop)
+    max_hold_bars: int = 30
+
+    # Volatility regime filter (relative):
+    # Compute short ATR (atr_period) and long ATR (atr_regime_period), require ratio in [min,max].
+    # Helps avoid dead low-vol and chaotic high-vol regimes.
+    atr_regime_period: int = 100
+    atr_regime_min_ratio: Decimal = Decimal("0.6")
+    atr_regime_max_ratio: Decimal = Decimal("1.8")
 
     # Quality filters to reduce losing trades:
     # Require entry candle impulse: TrueRange(last, prev) >= min_impulse_atr_mult * ATR
@@ -96,6 +108,7 @@ class VwapMomentumStrategy:
         self._msk = ZoneInfo("Europe/Moscow")
         self._exit_streak: int = 0
         self._last_pos_sign: int = 0
+        self._hold_bars: int = 0
 
     def _bar_minutes(self) -> int:
         tf = str(self.cfg.timeframe).lower().strip()
@@ -192,6 +205,10 @@ class VwapMomentumStrategy:
         if pos_sign != self._last_pos_sign:
             self._exit_streak = 0
             self._last_pos_sign = pos_sign
+            self._hold_bars = 0
+        if pos_sign != 0:
+            # Count bars in position (close-based)
+            self._hold_bars += 1
 
         # Time-based forced exit near session end
         mins_to_end = self._minutes_to_session_end(last.time)
@@ -245,6 +262,13 @@ class VwapMomentumStrategy:
         # ATR is attached as a hint (price units) for optional ATR-based stop calculations in runner.
         a = atr(candles, int(self.cfg.atr_period))
 
+        # Volatility regime filter (entries only): short ATR must be within a reasonable range vs long ATR.
+        long_atr = atr(candles, int(self.cfg.atr_regime_period)) if int(self.cfg.atr_regime_period) > 0 else None
+        atr_ratio_ok = True
+        if a is not None and a > 0 and long_atr is not None and long_atr > 0:
+            r = a / long_atr
+            atr_ratio_ok = (r >= Decimal(str(self.cfg.atr_regime_min_ratio))) and (r <= Decimal(str(self.cfg.atr_regime_max_ratio)))
+
         # Volume filter (current vs avg of previous window)
         if self.cfg.min_volume_ratio is not None and self.cfg.min_volume_ratio > 0:
             avg_v = average_volume(candles, int(self.cfg.volume_window), include_last=False)
@@ -259,6 +283,20 @@ class VwapMomentumStrategy:
 
         # Exits (deterministic, close-based): VWAP cross against + EMA confirm bars
         if current_position_qty > 0:
+            if int(self.cfg.max_hold_bars) > 0 and self._hold_bars >= int(self.cfg.max_hold_bars):
+                self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
+                return Signal(
+                    strategy_name=strategy_name,
+                    figi=self.figi,
+                    ts=last.time,
+                    signal_type=SignalType.TARGET_QTY,
+                    target_qty=0,
+                    reason=f"exit: time-stop {self._hold_bars} bars",
+                    atr=a,
+                    risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
+                    sl_points=_to_decimal(self.cfg.sl_points),
+                    tp_points=_to_decimal(self.cfg.tp_points),
+                )
             if self.cfg.exit_on_vwap_cross and last.close < vwap_now:
                 self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
                 return Signal(
@@ -292,6 +330,20 @@ class VwapMomentumStrategy:
                     tp_points=_to_decimal(self.cfg.tp_points),
                 )
         if current_position_qty < 0:
+            if int(self.cfg.max_hold_bars) > 0 and self._hold_bars >= int(self.cfg.max_hold_bars):
+                self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
+                return Signal(
+                    strategy_name=strategy_name,
+                    figi=self.figi,
+                    ts=last.time,
+                    signal_type=SignalType.TARGET_QTY,
+                    target_qty=0,
+                    reason=f"exit: time-stop {self._hold_bars} bars",
+                    atr=a,
+                    risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
+                    sl_points=_to_decimal(self.cfg.sl_points),
+                    tp_points=_to_decimal(self.cfg.tp_points),
+                )
             if self.cfg.exit_on_vwap_cross and last.close > vwap_now:
                 self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
                 return Signal(
@@ -327,6 +379,9 @@ class VwapMomentumStrategy:
 
         # Entry (flat only)
         if current_position_qty == 0:
+            # Require regime filter for entries (if long ATR available)
+            if not atr_ratio_ok:
+                return None
             # VWAP cross conditions
             cross_up = (prev.close < vwap_prev) and (last.close > vwap_now)
             cross_down = (prev.close > vwap_prev) and (last.close < vwap_now)
@@ -346,8 +401,15 @@ class VwapMomentumStrategy:
             recent = candles[-(w + 1) : -1] if len(candles) >= (w + 1) else candles[:-1]
             min_low = min((c.low for c in recent), default=last.low)
             max_high = max((c.high for c in recent), default=last.high)
-            retest_up = (min_low < vwap_now) and (last.close > vwap_now)
-            retest_down = (max_high > vwap_now) and (last.close < vwap_now)
+            # Stricter retest: pullback touches VWAP (within ATR band) and closes back on the trend side.
+            touch_band = Decimal("0")
+            if a is not None and a > 0:
+                touch_band = a * Decimal(str(self.cfg.retest_touch_atr_mult))
+            touched_long = (last.low <= (vwap_now + touch_band)) and (last.close > vwap_now)
+            touched_short = (last.high >= (vwap_now - touch_band)) and (last.close < vwap_now)
+
+            retest_up = (min_low < vwap_now) and touched_long
+            retest_down = (max_high > vwap_now) and touched_short
             if self.cfg.require_retest_breakout:
                 retest_up = retest_up and (last.close > prev.high)
                 retest_down = retest_down and (last.close < prev.low)
