@@ -362,6 +362,7 @@ INDEX_HTML = """<!doctype html>
             <option value="ema_atr">ema_atr</option>
             <option value="trend_breakout_atr">trend_breakout_atr</option>
             <option value="intraday_vwap_momentum">intraday_vwap_momentum</option>
+            <option value="intraday_bollinger_rsi">intraday_bollinger_rsi</option>
           </select>
           <div class="muted" style="margin-top:0.75rem;">Описание стратегии:</div>
           <div id="strategyDesc" class="muted" style="white-space: pre-wrap; line-height: 1.45; background: rgba(15, 23, 42, 0.6); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem;">
@@ -1188,6 +1189,9 @@ INDEX_HTML = """<!doctype html>
         if (strategy === 'intraday_vwap_momentum') {
           return {"timeframe":"5min","vwap_window":60,"ema_fast":12,"ema_slow":36,"trend_timeframe":"1h","trend_ema_fast":20,"trend_ema_slow":50,"atr_period":14,"atr_sl_mult":"1.5","atr_tp_mult":"3.0","atr_trail_mult":"1.0","risk_per_trade_pct":0.25,"volume_window":50,"min_volume_ratio":1.7,"trade_sessions":[["10:15","12:30"],["14:00","16:30"]],"cooldown_bars":7,"exit_before_session_end_minutes":10};
         }
+        if (strategy === 'intraday_bollinger_rsi') {
+          return {"timeframe":"5min","bollinger_period":20,"bollinger_std_mult":"2.0","rsi_period":14,"rsi_overbought":70,"rsi_oversold":30,"atr_period":14,"sl_atr_mult":"1.0","tp_atr_mult":"2.0","risk_per_trade_pct":0.3,"volume_window":30,"min_volume_ratio":1.5,"trade_sessions":[["10:15","17:30"]],"cooldown_bars":3};
+        }
         // donchian_atr
         return {"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1};
       }
@@ -1289,6 +1293,35 @@ INDEX_HTML = """<!doctype html>
             '- sl_points / tp_points (в тиках, если тик известен; иначе в “ценовых пунктах”)',
             '- atr_sl_mult / atr_tp_mult (альтернатива фиксированным SL/TP)',
             '- atr_trail_mult: трейлинг стоп по ATR (опционально)',
+            '- risk_per_trade_pct',
+            '- volume_window / min_volume_ratio',
+            '- trade_sessions (MSK), cooldown_bars',
+          ].join('\\n');
+        }
+        if (strategy === 'intraday_bollinger_rsi') {
+          return [
+            'Intraday Bollinger–RSI Reversion (5m, mean reversion)',
+            '',
+            'Идея: брать частые короткие сделки на возврате цены к среднему (SMA).',
+            'Вход: экстремум по полосам Боллинджера + RSI (перекупленность/перепроданность).',
+            'Фильтры: торговые окна (MSK) + повышенный объём + cooldown после сделки.',
+            '',
+            'Лонг (вход только из 0): Close < нижней полосы и RSI < rsi_oversold.',
+            'Шорт (вход только из 0): Close > верхней полосы и RSI > rsi_overbought.',
+            '',
+            'Выход:',
+            '- Возврат к средней: Close пересёк SMA(mid) в обратную сторону',
+            '- SL/TP: раннер выставляет уровни по ATR (sl_atr_mult / tp_atr_mult), контроль по close',
+            '- Закрытие позиции за 5 минут до конца торгового окна',
+            '',
+            'Сайзинг:',
+            '- RiskGate рассчитывает кол-во контрактов по risk_per_trade_pct и стоп-риску на 1 контракт (ATR × sl_atr_mult × spec).',
+            '',
+            'Параметры:',
+            '- timeframe: "5min" или "1min"',
+            '- bollinger_period / bollinger_std_mult',
+            '- rsi_period / rsi_overbought / rsi_oversold',
+            '- atr_period / sl_atr_mult / tp_atr_mult',
             '- risk_per_trade_pct',
             '- volume_window / min_volume_ratio',
             '- trade_sessions (MSK), cooldown_bars',
@@ -2130,6 +2163,23 @@ class UiServer:
                         )
                 return sig
 
+            # Quick diagnostics: how many raw entry signals exist if we ignore position state (pos=0 always)
+            raw_entries = 0
+            try:
+                for i in range(len(candles)):
+                    w = candles[: i + 1]
+                    td = _trend_dir_for_ts(w[-1].time) if w else 0
+                    s0 = st.generate_signal(
+                        candles=w,
+                        current_position_qty=0,
+                        trend_direction=td,
+                        strategy_name=strat.value,
+                    )
+                    if s0 is not None and int(getattr(s0, "target_qty", 0)) != 0:
+                        raw_entries += 1
+            except Exception:  # noqa: BLE001
+                raw_entries = -1
+
             res = run_backtest_target_qty(figi=figi, strategy_name=strat.value, candles=candles, signal_fn=sig_fn, cfg=bt_cfg)
             summ = summarize(res.trades, res.equity)
             return _json_response(
@@ -2157,6 +2207,250 @@ class UiServer:
                         "winrate": summ.winrate,
                         "total_pnl": str(summ.total_pnl),
                         "max_drawdown": str(summ.max_drawdown),
+                    },
+                    "debug": {
+                        "timeframe": tf_norm,
+                        "trend_timeframe": tf_trend if tf_trend in {"1h", "4h"} else None,
+                        "trend_candles": len(trend_ts) if trend_ts else 0,
+                        "raw_entry_signals_pos0": raw_entries,
+                    },
+                    "trades": [t.__dict__ for t in res.trades[-200:]],
+                    "equity": [p.__dict__ for p in res.equity[-2000:]],
+                }
+            )
+
+        if strat.value == "intraday_bollinger_rsi":
+            # Intraday only (1min/5min). Note: large day ranges may be heavy; keep user-provided days but
+            # rely on broker/SDK to enforce limits. UI can retry with fewer days if needed.
+            tf = str(params.get("timeframe") or "5min")
+            tf_norm = tf.lower().strip()
+            # Hard guardrails to prevent "hang" on huge 1-minute ranges.
+            if tf_norm == "1min" and days > 10:
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "timeframe=1min слишком тяжёлый для long-run. Уменьшите days до 10 (или выберите 5min).",
+                    },
+                    status=400,
+                )
+            if tf_norm == "5min" and days > 45:
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "timeframe=5min слишком тяжёлый для long-run. Уменьшите days до 45.",
+                    },
+                    status=400,
+                )
+
+            candles_tf_all = await asyncio.wait_for(
+                repo.fetch_intraday_range(figi=figi, from_ts=from_ts, to_ts=to_ts, timeframe=tf),
+                timeout=120,
+            )
+            if not candles_tf_all:
+                logger.warning(
+                    "backtest_run no candles returned figi=%s interval=%s from_ts=%s to_ts=%s",
+                    figi,
+                    tf,
+                    from_ts.isoformat(),
+                    to_ts.isoformat(),
+                )
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "Не удалось загрузить свечи (интрадей). Попробуйте уменьшить days или переключить timeframe на 5min.",
+                        "debug": {"interval": tf, "from_ts": from_ts.isoformat(), "to_ts": to_ts.isoformat()},
+                    },
+                    status=500,
+                )
+            end_tf = candles_tf_all[-1].time
+            cutoff_tf = end_tf - timedelta(days=days)
+            candles = [c for c in candles_tf_all if c.time >= cutoff_tf]
+            if not candles:
+                candles = candles_tf_all[-min(len(candles_tf_all), 2000) :]
+
+            from app.strategies.intraday.bollinger_rsi import BollingerRsiConfig, BollingerRsiStrategy, _to_decimal
+
+            p = dict(params or {})
+            cfg0 = BollingerRsiConfig()
+            br_cfg = BollingerRsiConfig(
+                timeframe=str(p.get("timeframe", cfg0.timeframe)),
+                bollinger_period=int(p.get("bollinger_period", cfg0.bollinger_period)),
+                bollinger_std_mult=_to_decimal(p.get("bollinger_std_mult", cfg0.bollinger_std_mult)) or cfg0.bollinger_std_mult,
+                rsi_period=int(p.get("rsi_period", cfg0.rsi_period)),
+                rsi_overbought=_to_decimal(p.get("rsi_overbought", cfg0.rsi_overbought)) or cfg0.rsi_overbought,
+                rsi_oversold=_to_decimal(p.get("rsi_oversold", cfg0.rsi_oversold)) or cfg0.rsi_oversold,
+                atr_period=int(p.get("atr_period", cfg0.atr_period)),
+                sl_atr_mult=_to_decimal(p.get("sl_atr_mult", cfg0.sl_atr_mult)) or cfg0.sl_atr_mult,
+                tp_atr_mult=_to_decimal(p.get("tp_atr_mult", cfg0.tp_atr_mult)) or cfg0.tp_atr_mult,
+                risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct)) or cfg0.risk_per_trade_pct,
+                volume_window=int(p.get("volume_window", cfg0.volume_window)),
+                min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
+                trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
+                cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
+            )
+            st = BollingerRsiStrategy(figi=figi, config=br_cfg)
+
+            # Risk-based sizing for dry-run (same approach as intraday_vwap_momentum UI backtest):
+            def _norm_risk_pct(v: Decimal) -> Decimal:
+                return v / Decimal("100") if v >= Decimal("0.1") else v
+
+            inst_cfg = meta.get("instrument_config")
+            max_pos = int(meta.get("max_position_qty") or getattr(inst_cfg, "max_position_qty", None) or 10)
+
+            risk_frac = _norm_risk_pct(_to_decimal(p.get("risk_per_trade_pct", br_cfg.risk_per_trade_pct)) or br_cfg.risk_per_trade_pct)
+            risk_budget = bt_cfg.initial_equity * risk_frac
+            pm = f_spec.price_multiplier
+            lot = Decimal(int(f_spec.lot or 1))
+
+            # Close-based SL/TP simulation (ATR multiples) like runner does.
+            entry_price: Optional[Decimal] = None
+            stop_price: Optional[Decimal] = None
+            tp_price: Optional[Decimal] = None
+
+            def _set_levels(*, entry: Decimal, atr_value: Optional[Decimal], direction: int) -> None:
+                nonlocal entry_price, stop_price, tp_price
+                if direction == 0:
+                    return
+                if atr_value is None or atr_value <= 0:
+                    return
+                if br_cfg.sl_atr_mult is None or br_cfg.sl_atr_mult <= 0:
+                    return
+                if br_cfg.tp_atr_mult is None or br_cfg.tp_atr_mult <= 0:
+                    return
+                sl_dist = atr_value * br_cfg.sl_atr_mult
+                tp_dist = atr_value * br_cfg.tp_atr_mult
+                entry_price = entry
+                stop_price = (entry - sl_dist) if direction > 0 else (entry + sl_dist)
+                tp_price = (entry + tp_dist) if direction > 0 else (entry - tp_dist)
+
+            def _clear_levels() -> None:
+                nonlocal entry_price, stop_price, tp_price
+                entry_price = None
+                stop_price = None
+                tp_price = None
+
+            def sig_fn(w, pos):
+                nonlocal entry_price, stop_price, tp_price
+                if not w:
+                    return None
+                last = w[-1]
+
+                # 1) Exit by SL/TP levels (close-based)
+                if pos != 0 and stop_price is not None and tp_price is not None:
+                    if pos > 0 and (last.close <= stop_price or last.close >= tp_price):
+                        _clear_levels()
+                        try:
+                            st.apply_exit_cooldown(last.time)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        from core.models.entities import Signal as CoreSignal, SignalType as CoreSignalType
+
+                        return CoreSignal(
+                            strategy_name=strat.value,
+                            figi=figi,
+                            ts=last.time,
+                            signal_type=CoreSignalType.TARGET_QTY,
+                            target_qty=0,
+                            reason="exit: SL/TP hit (close-based)",
+                        )
+                    if pos < 0 and (last.close >= stop_price or last.close <= tp_price):
+                        _clear_levels()
+                        try:
+                            st.apply_exit_cooldown(last.time)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        from core.models.entities import Signal as CoreSignal, SignalType as CoreSignalType
+
+                        return CoreSignal(
+                            strategy_name=strat.value,
+                            figi=figi,
+                            ts=last.time,
+                            signal_type=CoreSignalType.TARGET_QTY,
+                            target_qty=0,
+                            reason="exit: SL/TP hit (close-based)",
+                        )
+
+                # 2) Strategy signal (entries/mean exit/session exit)
+                sig = st.generate_signal(candles=w, current_position_qty=pos, strategy_name=strat.value)
+                if sig is None:
+                    return None
+
+                # 3) Size entries (direction-only -> absolute qty)
+                if pos == 0 and sig.target_qty != 0 and abs(int(sig.target_qty)) == 1:
+                    a = getattr(sig, "atr", None)
+                    if a is None or a <= 0:
+                        return None
+                    # risk per 1 contract (RUB): ATR * sl_atr_mult * price_multiplier * lot
+                    rs = (a * br_cfg.sl_atr_mult) * pm * lot
+                    if rs is None or rs <= 0 or risk_budget <= 0:
+                        return None
+                    qty = int((risk_budget / rs).to_integral_value(rounding="ROUND_FLOOR"))
+                    if qty <= 0:
+                        return None
+                    qty = min(qty, max_pos) if max_pos > 0 else qty
+                    direction = 1 if int(sig.target_qty) > 0 else -1
+                    _set_levels(entry=last.close, atr_value=a, direction=direction)
+
+                    from core.models.entities import Signal as CoreSignal
+
+                    return CoreSignal(
+                        strategy_name=sig.strategy_name,
+                        figi=sig.figi,
+                        ts=sig.ts,
+                        signal_type=sig.signal_type,
+                        target_qty=(qty if direction > 0 else -qty),
+                        reason=f"{sig.reason} (sized qty={qty})",
+                        atr=a,
+                    )
+
+                # If we exit (target=0) - clear levels.
+                if sig.target_qty == 0:
+                    _clear_levels()
+
+                return sig
+
+            # Quick diagnostics: how many raw entry signals exist if we ignore position state (pos=0 always)
+            raw_entries = 0
+            try:
+                for i in range(len(candles)):
+                    w = candles[: i + 1]
+                    s0 = st.generate_signal(candles=w, current_position_qty=0, strategy_name=strat.value)
+                    if s0 is not None and int(getattr(s0, "target_qty", 0)) != 0:
+                        raw_entries += 1
+            except Exception:  # noqa: BLE001
+                raw_entries = -1
+
+            res = run_backtest_target_qty(figi=figi, strategy_name=strat.value, candles=candles, signal_fn=sig_fn, cfg=bt_cfg)
+            summ = summarize(res.trades, res.equity)
+            return _json_response(
+                {
+                    "ok": True,
+                    "strategy": strat.value,
+                    "figi": figi,
+                    "days": days,
+                    "initial_equity": str(bt_cfg.initial_equity),
+                    "final_equity": str(res.equity[-1].equity if res.equity else bt_cfg.initial_equity),
+                    "price_series": [{"ts": c.time.isoformat(), "close": str(c.close)} for c in candles[-2000:]],
+                    "instrument_spec": {
+                        "price_multiplier": str(f_spec.price_multiplier),
+                        "currency": f_spec.currency,
+                        "lot": f_spec.lot,
+                        "min_price_increment": None if f_spec.min_price_increment is None else str(f_spec.min_price_increment),
+                        "min_price_increment_amount": None
+                        if f_spec.min_price_increment_amount is None
+                        else str(f_spec.min_price_increment_amount),
+                        "source": f_spec.source,
+                        "max_position_qty": max_pos,
+                    },
+                    "summary": {
+                        "trades": summ.trades,
+                        "winrate": summ.winrate,
+                        "total_pnl": str(summ.total_pnl),
+                        "max_drawdown": str(summ.max_drawdown),
+                    },
+                    "debug": {
+                        "timeframe": tf_norm,
+                        "raw_entry_signals_pos0": raw_entries,
                     },
                     "trades": [t.__dict__ for t in res.trades[-200:]],
                     "equity": [p.__dict__ for p in res.equity[-2000:]],

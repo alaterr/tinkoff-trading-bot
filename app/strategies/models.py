@@ -7,3 +7,4 @@ class StrategyName(Enum):
     EMA_ATR = "ema_atr"
     TREND_BREAKOUT_ATR = "trend_breakout_atr"
     INTRADAY_VWAP_MOMENTUM = "intraday_vwap_momentum"
+    INTRADAY_BOLLINGER_RSI = "intraday_bollinger_rsi"

@@ -16,6 +16,7 @@ from reports.trade_log import write_equity_csv, write_summary_json, write_trades
 from app.strategies.positional.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
 from app.strategies.positional.ema_atr import EmaAtrTrendStrategy, EmaAtrConfig
 from app.strategies.intraday.vwap_momentum import VwapMomentumConfig, VwapMomentumStrategy, _to_decimal
+from app.strategies.intraday.bollinger_rsi import BollingerRsiConfig, BollingerRsiStrategy
 
 
 def _parse_dt(s: str) -> datetime:
@@ -54,13 +55,13 @@ def main():
                 continue
 
             sname = inst.strategy.name.value
-            if sname not in {"donchian_atr", "ema_atr", "intraday_vwap_momentum"}:
+            if sname not in {"donchian_atr", "ema_atr", "intraday_vwap_momentum", "intraday_bollinger_rsi"}:
                 continue
 
             # Fetch candles (uses sdk history cache if enabled in app settings)
             # For deterministic runs, user should freeze a time interval by --to.
             to = _parse_dt(args.to_dt) if args.to_dt else datetime.now(timezone.utc)
-            if sname == "intraday_vwap_momentum":
+            if sname in {"intraday_vwap_momentum", "intraday_bollinger_rsi"}:
                 tf = str(inst.strategy.parameters.get("timeframe", "1min"))
                 if args.from_dt:
                     from_ts = _parse_dt(args.from_dt)
@@ -88,30 +89,61 @@ def main():
                         candles=w, current_position_qty=pos, in_cooldown=False, strategy_name=sname
                     )
                 else:
-                    p = dict(inst.strategy.parameters or {})
-                    cfg0 = VwapMomentumConfig()
-                    vm_cfg = VwapMomentumConfig(
-                        timeframe=str(p.get("timeframe", cfg0.timeframe)),
-                        vwap_period=int(p.get("vwap_period", cfg0.vwap_period)),
-                        ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
-                        ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
-                        atr_period=int(p.get("atr_period", cfg0.atr_period)),
-                        sl_points=_to_decimal(p.get("sl_points", cfg0.sl_points)),
-                        tp_points=_to_decimal(p.get("tp_points", cfg0.tp_points)),
-                        atr_sl_mult=_to_decimal(p.get("atr_sl_mult", cfg0.atr_sl_mult)),
-                        atr_tp_mult=_to_decimal(p.get("atr_tp_mult", cfg0.atr_tp_mult)),
-                        risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct))
-                        or cfg0.risk_per_trade_pct,
-                        volume_window=int(p.get("volume_window", cfg0.volume_window)),
-                        min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio)) or cfg0.min_volume_ratio,
-                        trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
-                        cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
-                        exit_before_session_end_minutes=int(
-                            p.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)
-                        ),
-                    )
-                    st = VwapMomentumStrategy(figi=inst.figi, config=vm_cfg)
-                    sig_fn = lambda w, pos: st.generate_signal(candles=w, current_position_qty=pos, strategy_name=sname)
+                    if sname == "intraday_vwap_momentum":
+                        p = dict(inst.strategy.parameters or {})
+                        cfg0 = VwapMomentumConfig()
+                        vm_cfg = VwapMomentumConfig(
+                            timeframe=str(p.get("timeframe", cfg0.timeframe)),
+                            vwap_period=int(p.get("vwap_period", cfg0.vwap_period)),
+                            ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
+                            ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
+                            atr_period=int(p.get("atr_period", cfg0.atr_period)),
+                            sl_points=_to_decimal(p.get("sl_points", cfg0.sl_points)),
+                            tp_points=_to_decimal(p.get("tp_points", cfg0.tp_points)),
+                            atr_sl_mult=_to_decimal(p.get("atr_sl_mult", cfg0.atr_sl_mult)),
+                            atr_tp_mult=_to_decimal(p.get("atr_tp_mult", cfg0.atr_tp_mult)),
+                            risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct))
+                            or cfg0.risk_per_trade_pct,
+                            volume_window=int(p.get("volume_window", cfg0.volume_window)),
+                            min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio))
+                            or cfg0.min_volume_ratio,
+                            trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
+                            cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
+                            exit_before_session_end_minutes=int(
+                                p.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)
+                            ),
+                        )
+                        st = VwapMomentumStrategy(figi=inst.figi, config=vm_cfg)
+                        sig_fn = lambda w, pos: st.generate_signal(
+                            candles=w, current_position_qty=pos, strategy_name=sname
+                        )
+                    else:
+                        p = dict(inst.strategy.parameters or {})
+                        cfg0 = BollingerRsiConfig()
+                        br_cfg = BollingerRsiConfig(
+                            timeframe=str(p.get("timeframe", cfg0.timeframe)),
+                            bollinger_period=int(p.get("bollinger_period", cfg0.bollinger_period)),
+                            bollinger_std_mult=_to_decimal(p.get("bollinger_std_mult", cfg0.bollinger_std_mult))
+                            or cfg0.bollinger_std_mult,
+                            rsi_period=int(p.get("rsi_period", cfg0.rsi_period)),
+                            rsi_overbought=_to_decimal(p.get("rsi_overbought", cfg0.rsi_overbought))
+                            or cfg0.rsi_overbought,
+                            rsi_oversold=_to_decimal(p.get("rsi_oversold", cfg0.rsi_oversold)) or cfg0.rsi_oversold,
+                            atr_period=int(p.get("atr_period", cfg0.atr_period)),
+                            sl_atr_mult=_to_decimal(p.get("sl_atr_mult", cfg0.sl_atr_mult)) or cfg0.sl_atr_mult,
+                            tp_atr_mult=_to_decimal(p.get("tp_atr_mult", cfg0.tp_atr_mult)) or cfg0.tp_atr_mult,
+                            risk_per_trade_pct=_to_decimal(p.get("risk_per_trade_pct", cfg0.risk_per_trade_pct))
+                            or cfg0.risk_per_trade_pct,
+                            volume_window=int(p.get("volume_window", cfg0.volume_window)),
+                            min_volume_ratio=_to_decimal(p.get("min_volume_ratio", cfg0.min_volume_ratio))
+                            or cfg0.min_volume_ratio,
+                            trade_sessions=tuple(tuple(x) for x in (p.get("trade_sessions") or cfg0.trade_sessions)),
+                            cooldown_bars=int(p.get("cooldown_bars", cfg0.cooldown_bars)),
+                        )
+                        st = BollingerRsiStrategy(figi=inst.figi, config=br_cfg)
+                        sig_fn = lambda w, pos: st.generate_signal(
+                            candles=w, current_position_qty=pos, strategy_name=sname
+                        )
 
             bt_cfg = BacktestConfig(
                 initial_equity=Decimal(str(args.initial_equity)),
