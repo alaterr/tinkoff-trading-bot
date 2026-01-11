@@ -25,6 +25,15 @@ class VwapMomentumConfig:
     ema_slow: int = 20
     # Optional additional entry filter: require EMA_fast slope (reduces noise, but can cut frequency a lot)
     require_fast_slope: bool = True
+    # Entry mode:
+    # - "cross": only VWAP cross (strict, fewer trades)
+    # - "retest": VWAP retest/bounce (more trades)
+    # - "cross_or_retest": either condition (recommended)
+    entry_mode: str = "cross_or_retest"
+    # For retest mode: look back N bars and require price was on the other side of VWAP recently.
+    retest_lookback: int = 10
+    # Optional: require a micro-breakout on retest (close > prev.high for long / close < prev.low for short)
+    require_retest_breakout: bool = True
     # Higher timeframe trend filter (optional)
     trend_timeframe: Optional[str] = None  # "1h" | "4h" | None
     trend_ema_fast: int = 20
@@ -45,6 +54,11 @@ class VwapMomentumConfig:
     trade_sessions: Tuple[Tuple[str, str], ...] = (("10:00", "17:00"),)  # MSK
     cooldown_bars: int = 3
     exit_before_session_end_minutes: int = 5
+    # Exit tuning (to reduce noise):
+    # - exit_confirm_bars: require EMA-fast/slow opposite condition for N consecutive bars before exit
+    exit_confirm_bars: int = 2
+    # - exit_on_vwap_cross: exit if price crosses VWAP against the position (often reduces drawdowns)
+    exit_on_vwap_cross: bool = True
 
 
 def _to_decimal(v) -> Optional[Decimal]:
@@ -74,6 +88,8 @@ class VwapMomentumStrategy:
         self._cooldown_left: int = 0
         self._last_bar_ts: Optional[datetime] = None
         self._msk = ZoneInfo("Europe/Moscow")
+        self._exit_streak: int = 0
+        self._last_pos_sign: int = 0
 
     def _bar_minutes(self) -> int:
         tf = str(self.cfg.timeframe).lower().strip()
@@ -166,6 +182,10 @@ class VwapMomentumStrategy:
 
         last = candles[-1]
         self._on_new_bar(last.time)
+        pos_sign = 1 if current_position_qty > 0 else (-1 if current_position_qty < 0 else 0)
+        if pos_sign != self._last_pos_sign:
+            self._exit_streak = 0
+            self._last_pos_sign = pos_sign
 
         # Time-based forced exit near session end
         mins_to_end = self._minutes_to_session_end(last.time)
@@ -231,35 +251,73 @@ class VwapMomentumStrategy:
         long_bias = (last.close > vwap_now) and (fast_now > slow_now)
         short_bias = (last.close < vwap_now) and (fast_now < slow_now)
 
-        # EMA-cross early exit
-        if current_position_qty > 0 and (fast_now < slow_now):
-            self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
-            return Signal(
-                strategy_name=strategy_name,
-                figi=self.figi,
-                ts=last.time,
-                signal_type=SignalType.TARGET_QTY,
-                target_qty=0,
-                reason="exit: ema_fast crossed below ema_slow",
-                atr=a,
-                risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
-                sl_points=_to_decimal(self.cfg.sl_points),
-                tp_points=_to_decimal(self.cfg.tp_points),
-            )
-        if current_position_qty < 0 and (fast_now > slow_now):
-            self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
-            return Signal(
-                strategy_name=strategy_name,
-                figi=self.figi,
-                ts=last.time,
-                signal_type=SignalType.TARGET_QTY,
-                target_qty=0,
-                reason="exit: ema_fast crossed above ema_slow",
-                atr=a,
-                risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
-                sl_points=_to_decimal(self.cfg.sl_points),
-                tp_points=_to_decimal(self.cfg.tp_points),
-            )
+        # Exits (deterministic, close-based): VWAP cross against + EMA confirm bars
+        if current_position_qty > 0:
+            if self.cfg.exit_on_vwap_cross and last.close < vwap_now:
+                self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
+                return Signal(
+                    strategy_name=strategy_name,
+                    figi=self.figi,
+                    ts=last.time,
+                    signal_type=SignalType.TARGET_QTY,
+                    target_qty=0,
+                    reason="exit: close < VWAP",
+                    atr=a,
+                    risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
+                    sl_points=_to_decimal(self.cfg.sl_points),
+                    tp_points=_to_decimal(self.cfg.tp_points),
+                )
+            if fast_now < slow_now:
+                self._exit_streak += 1
+            else:
+                self._exit_streak = 0
+            if self._exit_streak >= max(1, int(self.cfg.exit_confirm_bars)):
+                self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
+                return Signal(
+                    strategy_name=strategy_name,
+                    figi=self.figi,
+                    ts=last.time,
+                    signal_type=SignalType.TARGET_QTY,
+                    target_qty=0,
+                    reason=f"exit: ema_fast < ema_slow for {self._exit_streak} bars",
+                    atr=a,
+                    risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
+                    sl_points=_to_decimal(self.cfg.sl_points),
+                    tp_points=_to_decimal(self.cfg.tp_points),
+                )
+        if current_position_qty < 0:
+            if self.cfg.exit_on_vwap_cross and last.close > vwap_now:
+                self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
+                return Signal(
+                    strategy_name=strategy_name,
+                    figi=self.figi,
+                    ts=last.time,
+                    signal_type=SignalType.TARGET_QTY,
+                    target_qty=0,
+                    reason="exit: close > VWAP",
+                    atr=a,
+                    risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
+                    sl_points=_to_decimal(self.cfg.sl_points),
+                    tp_points=_to_decimal(self.cfg.tp_points),
+                )
+            if fast_now > slow_now:
+                self._exit_streak += 1
+            else:
+                self._exit_streak = 0
+            if self._exit_streak >= max(1, int(self.cfg.exit_confirm_bars)):
+                self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
+                return Signal(
+                    strategy_name=strategy_name,
+                    figi=self.figi,
+                    ts=last.time,
+                    signal_type=SignalType.TARGET_QTY,
+                    target_qty=0,
+                    reason=f"exit: ema_fast > ema_slow for {self._exit_streak} bars",
+                    atr=a,
+                    risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
+                    sl_points=_to_decimal(self.cfg.sl_points),
+                    tp_points=_to_decimal(self.cfg.tp_points),
+                )
 
         # Entry (flat only)
         if current_position_qty == 0:
@@ -273,27 +331,54 @@ class VwapMomentumStrategy:
             slope_ok_long = (fast_up if self.cfg.require_fast_slope else True)
             slope_ok_short = (fast_down if self.cfg.require_fast_slope else True)
 
-            if long_bias and cross_up and slope_ok_long and (trend_direction in (0, 1)):
+            mode = str(self.cfg.entry_mode or "cross_or_retest").lower().strip()
+            if mode not in {"cross", "retest", "cross_or_retest"}:
+                mode = "cross_or_retest"
+
+            # Retest logic (more trades): recently on the other side of VWAP, now reclaimed.
+            w = max(1, int(self.cfg.retest_lookback))
+            recent = candles[-(w + 1) : -1] if len(candles) >= (w + 1) else candles[:-1]
+            min_low = min((c.low for c in recent), default=last.low)
+            max_high = max((c.high for c in recent), default=last.high)
+            retest_up = (min_low < vwap_now) and (last.close > vwap_now)
+            retest_down = (max_high > vwap_now) and (last.close < vwap_now)
+            if self.cfg.require_retest_breakout:
+                retest_up = retest_up and (last.close > prev.high)
+                retest_down = retest_down and (last.close < prev.low)
+
+            allow_long = (trend_direction in (0, 1))
+            allow_short = (trend_direction in (0, -1))
+
+            long_entry = long_bias and slope_ok_long and allow_long and (
+                (cross_up if mode in {"cross", "cross_or_retest"} else False)
+                or (retest_up if mode in {"retest", "cross_or_retest"} else False)
+            )
+            short_entry = short_bias and slope_ok_short and allow_short and (
+                (cross_down if mode in {"cross", "cross_or_retest"} else False)
+                or (retest_down if mode in {"retest", "cross_or_retest"} else False)
+            )
+
+            if long_entry:
                 return Signal(
                     strategy_name=strategy_name,
                     figi=self.figi,
                     ts=last.time,
                     signal_type=SignalType.TARGET_QTY,
                     target_qty=1,  # direction; RiskGate may size into actual qty using risk_stop
-                    reason="entry: VWAP cross up + EMA trend up",
+                    reason=f"entry: {mode} long",
                     atr=a,
                     risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
                     sl_points=_to_decimal(self.cfg.sl_points),
                     tp_points=_to_decimal(self.cfg.tp_points),
                 )
-            if short_bias and cross_down and slope_ok_short and (trend_direction in (0, -1)):
+            if short_entry:
                 return Signal(
                     strategy_name=strategy_name,
                     figi=self.figi,
                     ts=last.time,
                     signal_type=SignalType.TARGET_QTY,
                     target_qty=-1,  # direction; RiskGate may size into actual qty using risk_stop
-                    reason="entry: VWAP cross down + EMA trend down",
+                    reason=f"entry: {mode} short",
                     atr=a,
                     risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
                     sl_points=_to_decimal(self.cfg.sl_points),

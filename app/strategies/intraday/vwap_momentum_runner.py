@@ -78,6 +78,9 @@ class VwapMomentumRunner(BaseStrategy):
             ema_fast=int(p.get("ema_fast", cfg0.ema_fast)),
             ema_slow=int(p.get("ema_slow", cfg0.ema_slow)),
             require_fast_slope=bool(p.get("require_fast_slope", cfg0.require_fast_slope)),
+            entry_mode=str(p.get("entry_mode", cfg0.entry_mode)),
+            retest_lookback=int(p.get("retest_lookback", cfg0.retest_lookback)),
+            require_retest_breakout=bool(p.get("require_retest_breakout", cfg0.require_retest_breakout)),
             trend_timeframe=(str(p["trend_timeframe"]) if p.get("trend_timeframe") is not None else cfg0.trend_timeframe),
             trend_ema_fast=int(p.get("trend_ema_fast", cfg0.trend_ema_fast)),
             trend_ema_slow=int(p.get("trend_ema_slow", cfg0.trend_ema_slow)),
@@ -95,6 +98,8 @@ class VwapMomentumRunner(BaseStrategy):
             exit_before_session_end_minutes=int(
                 p.get("exit_before_session_end_minutes", cfg0.exit_before_session_end_minutes)
             ),
+            exit_confirm_bars=int(p.get("exit_confirm_bars", cfg0.exit_confirm_bars)),
+            exit_on_vwap_cross=bool(p.get("exit_on_vwap_cross", cfg0.exit_on_vwap_cross)),
         )
 
         self.store = StateStore(db_path="state.db")

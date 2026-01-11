@@ -1329,7 +1329,7 @@ INDEX_HTML = """<!doctype html>
         if (strategy === 'intraday_vwap_momentum') {
           // Default preset: active but not too noisy.
           // If you want more trades/day: set require_fast_slope=false and min_volume_ratio=1.0..1.1
-          return {"timeframe":"1min","vwap_window":60,"ema_fast":10,"ema_slow":30,"require_fast_slope":false,"trend_timeframe":"1h","trend_ema_fast":20,"trend_ema_slow":50,"atr_period":14,"atr_sl_mult":"1.5","atr_tp_mult":"3.0","atr_trail_mult":"1.0","risk_per_trade_pct":0.25,"volume_window":30,"min_volume_ratio":"1.1","cooldown_bars":5,"exit_before_session_end_minutes":10,"trade_sessions":[["10:15","12:30"],["14:00","16:30"]]};
+          return {"timeframe":"1min","vwap_window":60,"ema_fast":10,"ema_slow":30,"require_fast_slope":false,"entry_mode":"cross_or_retest","retest_lookback":10,"require_retest_breakout":true,"trend_timeframe":"1h","trend_ema_fast":20,"trend_ema_slow":50,"atr_period":14,"atr_sl_mult":"1.5","atr_tp_mult":"3.0","atr_trail_mult":"1.0","risk_per_trade_pct":0.25,"volume_window":30,"min_volume_ratio":"1.1","cooldown_bars":5,"exit_before_session_end_minutes":10,"exit_confirm_bars":2,"exit_on_vwap_cross":true,"trade_sessions":[["10:15","12:30"],["14:00","16:30"]]};
         }
         if (strategy === 'intraday_bollinger_rsi') {
           return {"timeframe":"5min","bollinger_period":12,"bollinger_std_mult":"2.0","rsi_period":15,"rsi_overbought":"69","rsi_oversold":"31","atr_period":19,"sl_atr_mult":"1.6","tp_atr_mult":"1.1","risk_per_trade_pct":0.3,"volume_window":24,"min_volume_ratio":"1.1","trade_sessions":[["10:15","17:30"]],"cooldown_bars":1};
@@ -2752,7 +2752,126 @@ class UiServer:
                     return dist * pm * lot
                 return None
 
+            # Close-based SL/TP/trailing simulation (same idea as runner):
+            entry_price: Optional[Decimal] = None
+            stop_price: Optional[Decimal] = None
+            tp_price: Optional[Decimal] = None
+            peak_price: Optional[Decimal] = None
+            trough_price: Optional[Decimal] = None
+
+            def _set_levels(*, entry: Decimal, atr_value: Optional[Decimal], direction: int) -> None:
+                nonlocal entry_price, stop_price, tp_price, peak_price, trough_price
+                if direction == 0:
+                    return
+                stop_dist = None
+                tp_dist = None
+
+                # stop distance in price units
+                if vm_cfg.sl_points is not None and vm_cfg.sl_points > 0:
+                    stop_dist = (vm_cfg.sl_points * tick_size) if (tick_size is not None and tick_size > 0) else vm_cfg.sl_points
+                elif vm_cfg.atr_sl_mult is not None and vm_cfg.atr_sl_mult > 0 and atr_value is not None and atr_value > 0:
+                    stop_dist = atr_value * vm_cfg.atr_sl_mult
+
+                # tp distance in price units
+                if vm_cfg.tp_points is not None and vm_cfg.tp_points > 0:
+                    tp_dist = (vm_cfg.tp_points * tick_size) if (tick_size is not None and tick_size > 0) else vm_cfg.tp_points
+                elif vm_cfg.atr_tp_mult is not None and vm_cfg.atr_tp_mult > 0 and atr_value is not None and atr_value > 0:
+                    tp_dist = atr_value * vm_cfg.atr_tp_mult
+
+                if stop_dist is None or tp_dist is None:
+                    return
+
+                entry_price = entry
+                if direction > 0:
+                    stop_price = entry - stop_dist
+                    tp_price = entry + tp_dist
+                    peak_price = entry
+                    trough_price = None
+                else:
+                    stop_price = entry + stop_dist
+                    tp_price = entry - tp_dist
+                    trough_price = entry
+                    peak_price = None
+
+            def _clear_levels() -> None:
+                nonlocal entry_price, stop_price, tp_price, peak_price, trough_price
+                entry_price = None
+                stop_price = None
+                tp_price = None
+                peak_price = None
+                trough_price = None
+
+            def _update_trailing(*, direction: int, close: Decimal, atr_value: Optional[Decimal]) -> None:
+                nonlocal stop_price, peak_price, trough_price
+                if direction == 0:
+                    return
+                if vm_cfg.atr_trail_mult is None or vm_cfg.atr_trail_mult <= 0:
+                    return
+                if atr_value is None or atr_value <= 0:
+                    return
+                dist = atr_value * vm_cfg.atr_trail_mult
+                if direction > 0:
+                    peak_price = close if peak_price is None else max(peak_price, close)
+                    trail = peak_price - dist
+                    if stop_price is None or trail > stop_price:
+                        stop_price = trail
+                else:
+                    trough_price = close if trough_price is None else min(trough_price, close)
+                    trail = trough_price + dist
+                    if stop_price is None or trail < stop_price:
+                        stop_price = trail
+
             def sig_fn(w, pos):
+                # 0) If in position, update trailing + exit by SL/TP (close-based)
+                if w:
+                    last = w[-1]
+                else:
+                    return None
+
+                if pos != 0:
+                    direction = 1 if pos > 0 else -1
+                    # ATR for trailing (same period as strategy)
+                    try:
+                        from app.strategies.positional.indicators import atr
+
+                        a_now = atr(w, int(vm_cfg.atr_period))
+                    except Exception:  # noqa: BLE001
+                        a_now = None
+
+                    try:
+                        _update_trailing(direction=direction, close=last.close, atr_value=a_now)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                    # SL/TP check
+                    if stop_price is not None and tp_price is not None:
+                        if direction > 0:
+                            if last.close <= stop_price or last.close >= tp_price:
+                                _clear_levels()
+                                from core.models.entities import Signal as CoreSignal, SignalType as CoreSignalType
+
+                                return CoreSignal(
+                                    strategy_name=strat.value,
+                                    figi=last.figi,
+                                    ts=last.time,
+                                    signal_type=CoreSignalType.TARGET_QTY,
+                                    target_qty=0,
+                                    reason="exit: SL/TP hit (close-based)",
+                                )
+                        else:
+                            if last.close >= stop_price or last.close <= tp_price:
+                                _clear_levels()
+                                from core.models.entities import Signal as CoreSignal, SignalType as CoreSignalType
+
+                                return CoreSignal(
+                                    strategy_name=strat.value,
+                                    figi=last.figi,
+                                    ts=last.time,
+                                    signal_type=CoreSignalType.TARGET_QTY,
+                                    target_qty=0,
+                                    reason="exit: SL/TP hit (close-based)",
+                                )
+
                 td = _trend_dir_for_ts(w[-1].time) if w else 0
                 sig = st.generate_signal(
                     candles=w,
@@ -2762,7 +2881,11 @@ class UiServer:
                 )
                 if sig is None:
                     return None
+
                 # Only size entries; exits keep 0
+                if int(getattr(sig, "target_qty", 0)) == 0:
+                    _clear_levels()
+
                 if pos == 0 and sig.target_qty != 0 and abs(int(sig.target_qty)) == 1:
                     rs = _stop_risk_per_contract_rub(w)
                     if rs is not None and rs > 0 and risk_budget > 0:
@@ -2785,6 +2908,11 @@ class UiServer:
                                 "lot": str(lot),
                             }
                         )
+                        # Set SL/TP levels at entry (using ATR from strategy if available)
+                        try:
+                            _set_levels(entry=last.close, atr_value=getattr(sig, "atr", None), direction=(1 if sig.target_qty > 0 else -1))
+                        except Exception:  # noqa: BLE001
+                            pass
                         from core.models.entities import Signal as CoreSignal
 
                         return CoreSignal(
