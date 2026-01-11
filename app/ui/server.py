@@ -1327,10 +1327,10 @@ INDEX_HTML = """<!doctype html>
           return {"timeframe":"1h","breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"2.0","atr_tp_mult":"3.0","atr_trail_mult":"1.5","trend_ema_fast":20,"trend_ema_slow":50,"risk_per_trade_pct":0.5,"volume_window":20,"min_volume_ratio":"1.2","trade_sessions":[["10:00","18:45"]],"exit_before_close_minutes":30,"days_before_expiry_to_roll":5};
         }
         if (strategy === 'intraday_vwap_momentum') {
-          return {"timeframe":"5min","vwap_window":60,"ema_fast":12,"ema_slow":36,"trend_timeframe":"1h","trend_ema_fast":20,"trend_ema_slow":50,"atr_period":14,"atr_sl_mult":"1.5","atr_tp_mult":"3.0","atr_trail_mult":"1.0","risk_per_trade_pct":0.25,"volume_window":50,"min_volume_ratio":1.7,"trade_sessions":[["10:15","12:30"],["14:00","16:30"]],"cooldown_bars":7,"exit_before_session_end_minutes":10};
+          return {"timeframe":"5min","vwap_period":105,"ema_fast":7,"ema_slow":31,"atr_period":19,"volume_window":35,"min_volume_ratio":"1.2","cooldown_bars":2,"exit_before_session_end_minutes":6,"sl_points":"30","tp_points":"160","trade_sessions":[["10:15","12:30"],["14:00","16:30"]],"trend_timeframe":null};
         }
         if (strategy === 'intraday_bollinger_rsi') {
-          return {"timeframe":"5min","bollinger_period":20,"bollinger_std_mult":"2.0","rsi_period":14,"rsi_overbought":70,"rsi_oversold":30,"atr_period":14,"sl_atr_mult":"1.0","tp_atr_mult":"2.0","risk_per_trade_pct":0.3,"volume_window":30,"min_volume_ratio":1.5,"trade_sessions":[["10:15","17:30"]],"cooldown_bars":3};
+          return {"timeframe":"5min","bollinger_period":12,"bollinger_std_mult":"2.0","rsi_period":15,"rsi_overbought":"69","rsi_oversold":"31","atr_period":19,"sl_atr_mult":"1.6","tp_atr_mult":"1.1","risk_per_trade_pct":0.3,"volume_window":24,"min_volume_ratio":"1.1","trade_sessions":[["10:15","17:30"]],"cooldown_bars":1};
         }
         // donchian_atr
         return {"breakout_lookback":20,"exit_lookback":10,"atr_period":14,"atr_stop_mult":"3","base_target_qty":1};

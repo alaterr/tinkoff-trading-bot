@@ -16,26 +16,26 @@ from core.models.entities import Candle, Signal, SignalType
 class BollingerRsiConfig:
     timeframe: str = "5min"  # "5min" | "1min"
 
-    bollinger_period: int = 20
+    bollinger_period: int = 12
     bollinger_std_mult: Decimal = Decimal("2.0")
 
-    rsi_period: int = 14
-    rsi_overbought: Decimal = Decimal("70")
-    rsi_oversold: Decimal = Decimal("30")
+    rsi_period: int = 15
+    rsi_overbought: Decimal = Decimal("69")
+    rsi_oversold: Decimal = Decimal("31")
 
-    atr_period: int = 14
-    sl_atr_mult: Decimal = Decimal("1.0")
-    tp_atr_mult: Decimal = Decimal("2.0")
+    atr_period: int = 19
+    sl_atr_mult: Decimal = Decimal("1.6")
+    tp_atr_mult: Decimal = Decimal("1.1")
 
     # risk per trade (0.3 => 0.3% or 0.003 => 0.3%)
     risk_per_trade_pct: Decimal = Decimal("0.3")
 
-    volume_window: int = 30
-    min_volume_ratio: Decimal = Decimal("1.5")
+    volume_window: int = 24
+    min_volume_ratio: Decimal = Decimal("1.1")
 
     # trade sessions in MSK, list of [start, end]
     trade_sessions: Tuple[Tuple[str, str], ...] = (("10:15", "17:30"),)
-    cooldown_bars: int = 3
+    cooldown_bars: int = 1
 
 
 def _to_decimal(v) -> Optional[Decimal]:

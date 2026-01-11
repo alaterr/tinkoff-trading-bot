@@ -15,22 +15,22 @@ from core.models.entities import Candle, Signal, SignalType
 
 @dataclass(frozen=True)
 class VwapMomentumConfig:
-    timeframe: str = "1min"  # "1min" | "5min"
+    timeframe: str = "5min"  # "1min" | "5min"
     # VWAP window:
     # - vwap_period: minutes (backward-compatible, default)
     # - vwap_window: bars (preferred for 5m setup). If set, it overrides vwap_period.
-    vwap_period: int = 30  # minutes
+    vwap_period: int = 105  # minutes
     vwap_window: Optional[int] = None  # bars
-    ema_fast: int = 5
-    ema_slow: int = 20
+    ema_fast: int = 7
+    ema_slow: int = 31
     # Higher timeframe trend filter (optional)
     trend_timeframe: Optional[str] = None  # "1h" | "4h" | None
     trend_ema_fast: int = 20
     trend_ema_slow: int = 50
-    atr_period: int = 14
+    atr_period: int = 19
     # fixed SL/TP in "points" (interpreted as ticks by runner)
-    sl_points: Optional[Decimal] = Decimal("50")
-    tp_points: Optional[Decimal] = Decimal("100")
+    sl_points: Optional[Decimal] = Decimal("30")
+    tp_points: Optional[Decimal] = Decimal("160")
     # ATR-based SL/TP alternative
     atr_sl_mult: Optional[Decimal] = None
     atr_tp_mult: Optional[Decimal] = None
@@ -38,11 +38,11 @@ class VwapMomentumConfig:
     atr_trail_mult: Optional[Decimal] = None
     # risk per trade (0.3 => 0.3% or 0.003 => 0.3%)
     risk_per_trade_pct: Decimal = Decimal("0.3")
-    volume_window: int = 20
-    min_volume_ratio: Decimal = Decimal("1.5")
+    volume_window: int = 35
+    min_volume_ratio: Decimal = Decimal("1.2")
     trade_sessions: Tuple[Tuple[str, str], ...] = (("10:00", "17:00"),)  # MSK
-    cooldown_bars: int = 3
-    exit_before_session_end_minutes: int = 5
+    cooldown_bars: int = 2
+    exit_before_session_end_minutes: int = 6
 
 
 def _to_decimal(v) -> Optional[Decimal]:
