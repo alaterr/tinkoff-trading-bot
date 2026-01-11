@@ -519,6 +519,52 @@ INDEX_HTML = """<!doctype html>
 
       <div class="row">
         <div class="card fade-in" style="grid-column: 1 / -1;">
+          <h3>📥 Выгрузка свечей (для локального дебага)</h3>
+          <div class="muted">Выберите стратегию и параметры — выгрузка соберёт нужные таймфреймы (и warmup) именно под неё.</div>
+          <div class="row" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-top: 0.75rem;">
+            <div>
+              <div class="muted">Джоба (быстрый выбор FIGI)</div>
+              <select id="exportJobSelect" style="width:100%; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary);">
+                <option value="">— выберите джобу —</option>
+              </select>
+            </div>
+            <div>
+              <div class="muted">FIGI</div>
+              <input id="exportFigi" placeholder="например FXXXXX..." />
+            </div>
+            <div>
+              <div class="muted">Стратегия</div>
+              <select id="exportStrategy" style="width:100%; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary);">
+                <option value="donchian_atr">donchian_atr</option>
+                <option value="ema_atr">ema_atr</option>
+                <option value="trend_breakout_atr">trend_breakout_atr</option>
+                <option value="intraday_vwap_momentum">intraday_vwap_momentum</option>
+                <option value="intraday_bollinger_rsi">intraday_bollinger_rsi</option>
+              </select>
+            </div>
+            <div>
+              <div class="muted">Горизонт (дней)</div>
+              <input id="exportDays" placeholder="например 30" value="30" />
+            </div>
+            <div>
+              <div class="muted">Формат</div>
+              <select id="exportFormat" style="width:100%; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary);">
+                <option value="csv">CSV</option>
+                <option value="jsonl">JSONL</option>
+              </select>
+            </div>
+            <div style="display:flex; align-items:end;">
+              <button class="success" onclick="downloadCandlesForStrategy()">⬇ Скачать свечи</button>
+            </div>
+          </div>
+          <div class="muted" style="margin-top:0.5rem;">Параметры стратегии (JSON):</div>
+          <textarea id="exportParamsInput" style="width:100%; min-height:120px; padding:0.75rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-family: 'Monaco','Menlo',monospace; font-size: 0.85rem;">{}</textarea>
+          <div class="muted" id="exportStatus" style="margin-top:0.75rem;">—</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="card fade-in" style="grid-column: 1 / -1;">
           <h3>📈 Стратегии</h3>
           <div class="muted">Сконфигурированные стратегии и время последней обработки</div>
           <div class="table-container">
@@ -777,6 +823,37 @@ INDEX_HTML = """<!doctype html>
             if (cur) btSel.value = cur;
           }
 
+          // Export candles job selector
+          const exSel = document.getElementById('exportJobSelect');
+          if (exSel) {
+            const cur = exSel.value;
+            exSel.innerHTML = '<option value=\"\">— выберите джобу —</option>';
+            for (const j of (jobs.items || [])) {
+              const opt = document.createElement('option');
+              opt.value = j.job_id;
+              opt.textContent = `${j.strategy} • ${j.figi}`;
+              exSel.appendChild(opt);
+            }
+            if (cur) exSel.value = cur;
+            exSel.onchange = () => {
+              const jid = (exSel.value || '').trim();
+              if (!jid) return;
+              const found = (jobs.items || []).find(x => x.job_id === jid);
+              if (found && found.figi) {
+                document.getElementById('exportFigi').value = found.figi;
+              }
+              if (found && found.strategy) {
+                const sel = document.getElementById('exportStrategy');
+                if (sel) sel.value = found.strategy;
+                const ep = document.getElementById('exportParamsInput');
+                if (ep) {
+                  try { ep.value = JSON.stringify(defaultParams(found.strategy)); }
+                  catch { ep.value = '{}'; }
+                }
+              }
+            };
+          }
+
           // Strategies
           const strategies = await jget('/api/strategies');
           fillTable('strategiesTbl', strategies.items, ['figi', 'strategy', 'instrument_type', 'last_processed'], {
@@ -914,6 +991,69 @@ INDEX_HTML = """<!doctype html>
           drawBacktestPriceChart(res.price_series || [], res.trades || []);
         } catch (e) {
           console.warn('Chart draw failed', e);
+        }
+      }
+
+      async function downloadCandlesForStrategy() {
+        const figi = (document.getElementById('exportFigi').value || '').trim();
+        const strategy = (document.getElementById('exportStrategy').value || '').trim();
+        const paramsText = (document.getElementById('exportParamsInput').value || '').trim();
+        const days = parseInt((document.getElementById('exportDays').value || '30').trim(), 10);
+        const fmt = (document.getElementById('exportFormat').value || 'csv').trim();
+        if (!figi) { alert('FIGI обязателен'); return; }
+        if (!strategy) { alert('Стратегия обязательна'); return; }
+        if (!days || days <= 0) { alert('Горизонт (дней) должен быть > 0'); return; }
+        let params = {};
+        try { params = paramsText ? JSON.parse(paramsText) : {}; }
+        catch (e) { alert('Параметры должны быть валидным JSON'); return; }
+
+        // Persist
+        state.set('export_strategy', strategy);
+        state.set('export_params', params);
+        state.set('export_days', days);
+        state.set('export_format', fmt);
+
+        const st = document.getElementById('exportStatus');
+        if (st) st.textContent = '⏳ Загружаю свечи...';
+
+        const status = await jget('/api/status');
+        if (!status || !status.token_set) {
+          if (st) st.textContent = 'Ошибка: токен не задан';
+          alert('Сначала установите токен (карточка "Доступ").');
+          return;
+        }
+
+        try {
+          const r = await fetch('/api/candles/export/strategy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ figi, strategy, params, days, format: fmt })
+          });
+          if (!r.ok) {
+            const j = await r.json().catch(() => null);
+            const msg = (j && (j.error || j.message)) ? (j.error || j.message) : `HTTP ${r.status}`;
+            if (st) st.textContent = 'Ошибка: ' + msg;
+            alert(msg);
+            return;
+          }
+          const blob = await r.blob();
+          let filename = `candles_${strategy}_${figi}_${days}d.zip`;
+          const cd = r.headers.get('Content-Disposition') || '';
+          const m = cd.match(/filename=\"?([^\";]+)\"?/i);
+          if (m && m[1]) filename = m[1];
+          const a = document.createElement('a');
+          const objUrl = URL.createObjectURL(blob);
+          a.href = objUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(objUrl);
+          if (st) st.textContent = `✅ Готово: ${filename}`;
+        } catch (e) {
+          console.error('downloadCandlesForStrategy failed', e);
+          if (st) st.textContent = 'Ошибка: не удалось скачать файл';
+          alert('Не удалось скачать файл (см. консоль).');
         }
       }
 
@@ -1386,6 +1526,46 @@ INDEX_HTML = """<!doctype html>
         if (s) s.onchange = syncParamsTemplate;
         // initial render
         syncParamsTemplate();
+
+        // Restore export settings
+        const es = document.getElementById('exportStrategy');
+        const ep = document.getElementById('exportParamsInput');
+        if (es) {
+          es.value = state.get('export_strategy', 'donchian_atr');
+          es.onchange = () => {
+            // if user didn't type custom params yet, refresh template on strategy change
+            try {
+              if (ep && (!ep.value || ep.value.trim() === '' || ep.value.trim() === '{}' )) {
+                ep.value = JSON.stringify(defaultParams(es.value || 'donchian_atr'));
+              }
+            } catch {}
+            state.set('export_strategy', es.value);
+          };
+        }
+        if (ep) {
+          const saved = state.get('export_params', null);
+          if (saved) {
+            try { ep.value = JSON.stringify(saved); } catch {}
+          }
+          if (!ep.value || ep.value.trim() === '') {
+            try { ep.value = JSON.stringify(defaultParams((es && es.value) ? es.value : 'donchian_atr')); } catch { ep.value = '{}'; }
+          }
+          ep.onchange = () => {
+            try { state.set('export_params', JSON.parse(ep.value || '{}')); }
+            catch {}
+          };
+        }
+        const ed = document.getElementById('exportDays');
+        if (ed) {
+          const v = state.get('export_days', 30);
+          ed.value = (v === null || v === undefined) ? '30' : String(v);
+          ed.onchange = () => state.set('export_days', parseInt((ed.value || '30'), 10) || 30);
+        }
+        const ef = document.getElementById('exportFormat');
+        if (ef) {
+          ef.value = state.get('export_format', 'csv');
+          ef.onchange = () => state.set('export_format', ef.value);
+        }
       });
 
       async function createJob() {
@@ -1674,6 +1854,442 @@ class UiServer:
         except Exception as e:  # noqa: BLE001
             logger.exception("futures search failed")
             return _json_response({"error": str(e)}, status=500)
+
+    async def handle_candles_export(self, request: web.Request) -> web.Response:
+        """
+        Download candles for local debugging.
+
+        GET /api/candles/export?figi=...&timeframe=D1|4h|1h|5min|1min&days=30&format=csv|jsonl
+        """
+        figi = (request.query.get("figi") or "").strip()
+        timeframe_raw = (request.query.get("timeframe") or "D1").strip()
+        fmt = (request.query.get("format") or "csv").strip().lower()
+        try:
+            days = int(request.query.get("days") or 30)
+        except Exception:  # noqa: BLE001
+            days = -1
+
+        if not figi:
+            return _json_response({"ok": False, "error": "figi обязателен"}, status=400)
+        if days <= 0 or days > 3650:
+            return _json_response({"ok": False, "error": "days должно быть в диапазоне 1..3650"}, status=400)
+        if fmt not in {"csv", "jsonl", "ndjson"}:
+            return _json_response({"ok": False, "error": "format должен быть csv или jsonl"}, status=400)
+        if not broker_client.credentials_set():
+            return _json_response({"ok": False, "error": "Сначала установите токен"}, status=400)
+
+        import asyncio
+        import csv
+        import io
+        from datetime import timedelta
+
+        from core.data.candles import CandleRepository
+        from t_tech.invest import CandleInterval
+
+        # Normalize timeframe
+        tf = timeframe_raw.lower().strip()
+        if tf in {"d1", "1d", "day", "daily"}:
+            tf_norm = "D1"
+        elif tf in {"4h", "h4"}:
+            tf_norm = "4h"
+        elif tf in {"1h", "h1", "hour"}:
+            tf_norm = "1h"
+        elif tf in {"5min", "m5", "5m"}:
+            tf_norm = "5min"
+        elif tf in {"1min", "m1", "1m"}:
+            tf_norm = "1min"
+        else:
+            return _json_response({"ok": False, "error": "timeframe должен быть D1/4h/1h/5min/1min"}, status=400)
+
+        # Guardrails: small timeframes can be huge
+        if tf_norm == "1min" and days > 10:
+            return _json_response({"ok": False, "error": "timeframe=1min слишком тяжёлый: уменьшите days до 10"}, status=400)
+        if tf_norm == "5min" and days > 45:
+            return _json_response({"ok": False, "error": "timeframe=5min слишком тяжёлый: уменьшите days до 45"}, status=400)
+
+        await broker_client.ainit()
+        repo = CandleRepository(broker=broker_client)
+        to_ts = datetime.now(timezone.utc)
+        # For expired futures it's useful to return "last N days ending at last available candle",
+        # so we fetch a small padding window and slice by last candle timestamp (only for heavier frames).
+        pad_days = 30 if tf_norm in {"D1", "1h", "4h"} else 0
+        from_ts_req = to_ts - timedelta(days=(days + pad_days))
+
+        try:
+            if tf_norm == "D1":
+                candles_all = await asyncio.wait_for(
+                    repo.fetch_range(
+                        figi=figi,
+                        from_ts=from_ts_req,
+                        to_ts=to_ts,
+                        interval=CandleInterval.CANDLE_INTERVAL_DAY,
+                    ),
+                    timeout=120,
+                )
+            else:
+                candles_all = await asyncio.wait_for(
+                    repo.fetch_intraday_range(figi=figi, from_ts=from_ts_req, to_ts=to_ts, timeframe=tf_norm),
+                    timeout=180,
+                )
+        except asyncio.TimeoutError:
+            return _json_response({"ok": False, "error": "Таймаут при загрузке свечей. Попробуйте уменьшить days."}, status=504)
+
+        if not candles_all:
+            return _json_response(
+                {
+                    "ok": False,
+                    "error": "Свечи не найдены. Проверьте FIGI и доступность истории.",
+                    "debug": {
+                        "figi": figi,
+                        "timeframe": tf_norm,
+                        "from_ts": from_ts_req.isoformat(),
+                        "to_ts": to_ts.isoformat(),
+                    },
+                },
+                status=404,
+            )
+
+        # Slice last N days ending at last candle timestamp (best-effort).
+        candles = candles_all
+        try:
+            end_ts = candles_all[-1].time
+            cutoff = end_ts - timedelta(days=days)
+            candles = [c for c in candles_all if c.time >= cutoff]
+            if not candles:
+                candles = candles_all
+        except Exception:  # noqa: BLE001
+            candles = candles_all
+
+        ts_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        ext = "jsonl" if fmt in {"jsonl", "ndjson"} else "csv"
+        filename = f"candles_{figi}_{tf_norm}_{days}d_{ts_stamp}.{ext}"
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+
+        if fmt in {"jsonl", "ndjson"}:
+            lines = []
+            for c in candles:
+                lines.append(
+                    json.dumps(
+                        {
+                            "figi": c.figi,
+                            "ts": c.time.isoformat(),
+                            "open": str(c.open),
+                            "high": str(c.high),
+                            "low": str(c.low),
+                            "close": str(c.close),
+                            "volume": int(c.volume),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            data = "\n".join(lines) + "\n"
+            return web.Response(text=data, content_type="application/x-ndjson", headers=headers)
+
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["ts", "open", "high", "low", "close", "volume"])
+        for c in candles:
+            w.writerow([c.time.isoformat(), str(c.open), str(c.high), str(c.low), str(c.close), int(c.volume)])
+        return web.Response(text=buf.getvalue(), content_type="text/csv", headers=headers)
+
+    async def handle_candles_export_strategy(self, request: web.Request) -> web.Response:
+        """
+        Export candles specifically required by a strategy (may include multiple timeframes).
+
+        POST /api/candles/export/strategy
+        body: { figi: str, strategy: str, params: object, days: int, format: "csv"|"jsonl" }
+
+        Always returns a ZIP:
+        - candles_*.csv|jsonl
+        - meta.json
+        """
+        body = await request.json()
+        figi = str(body.get("figi") or "").strip()
+        strategy = str(body.get("strategy") or "").strip()
+        params = body.get("params") or {}
+        fmt = str(body.get("format") or "csv").strip().lower()
+        try:
+            days = int(body.get("days") or 30)
+        except Exception:  # noqa: BLE001
+            days = -1
+
+        if not figi:
+            return _json_response({"ok": False, "error": "figi обязателен"}, status=400)
+        if not strategy:
+            return _json_response({"ok": False, "error": "strategy обязателен"}, status=400)
+        if not isinstance(params, dict):
+            return _json_response({"ok": False, "error": "params должен быть объектом (JSON)"}, status=400)
+        if days <= 0 or days > 3650:
+            return _json_response({"ok": False, "error": "days должно быть в диапазоне 1..3650"}, status=400)
+        if fmt not in {"csv", "jsonl", "ndjson"}:
+            return _json_response({"ok": False, "error": "format должен быть csv или jsonl"}, status=400)
+        if not broker_client.credentials_set():
+            return _json_response({"ok": False, "error": "Сначала установите токен"}, status=400)
+
+        import asyncio
+        import csv
+        import io
+        import math
+        import zipfile
+        from datetime import timedelta
+
+        from core.data.candles import CandleRepository
+        from t_tech.invest import CandleInterval
+
+        def _int(v, default: int) -> int:
+            try:
+                return int(v)
+            except Exception:  # noqa: BLE001
+                return int(default)
+
+        def _tf_norm(s: str) -> str:
+            t = str(s or "").lower().strip()
+            if t in {"d1", "1d", "day", "daily"}:
+                return "D1"
+            if t in {"4h", "h4"}:
+                return "4h"
+            if t in {"1h", "h1", "hour"}:
+                return "1h"
+            if t in {"5min", "m5", "5m"}:
+                return "5min"
+            if t in {"1min", "m1", "1m"}:
+                return "1min"
+            raise ValueError("timeframe должен быть D1/4h/1h/5min/1min")
+
+        def _bar_minutes(tf: str) -> int:
+            if tf == "D1":
+                return 24 * 60
+            if tf == "4h":
+                return 4 * 60
+            if tf == "1h":
+                return 60
+            if tf == "5min":
+                return 5
+            if tf == "1min":
+                return 1
+            raise ValueError("unsupported timeframe")
+
+        def _warmup_days_from_bars(tf: str, warmup_bars: int) -> int:
+            # Convert bars -> calendar days (rough but safe).
+            bm = _bar_minutes(tf)
+            return max(2, int(math.ceil((max(0, int(warmup_bars)) * bm) / (24 * 60))) + 1)
+
+        def _guard_days(tf: str, requested_days: int) -> Optional[str]:
+            if tf == "1min" and requested_days > 10:
+                return "timeframe=1min слишком тяжёлый: уменьшите days до 10"
+            if tf == "5min" and requested_days > 45:
+                return "timeframe=5min слишком тяжёлый: уменьшите days до 45"
+            return None
+
+        async def _fetch(tf: str, total_days: int) -> list:
+            to_ts = datetime.now(timezone.utc)
+            # padding for expired futures (best-effort)
+            pad_days = 30 if tf in {"D1", "1h", "4h"} else 0
+            from_ts_req = to_ts - timedelta(days=(total_days + pad_days))
+            if tf == "D1":
+                candles_all = await asyncio.wait_for(
+                    repo.fetch_range(
+                        figi=figi,
+                        from_ts=from_ts_req,
+                        to_ts=to_ts,
+                        interval=CandleInterval.CANDLE_INTERVAL_DAY,
+                    ),
+                    timeout=120,
+                )
+            else:
+                candles_all = await asyncio.wait_for(
+                    repo.fetch_intraday_range(figi=figi, from_ts=from_ts_req, to_ts=to_ts, timeframe=tf),
+                    timeout=180,
+                )
+            if not candles_all:
+                return []
+            # end at last candle
+            end_ts = candles_all[-1].time
+            cutoff = end_ts - timedelta(days=total_days)
+            sliced = [c for c in candles_all if c.time >= cutoff]
+            return sliced or candles_all
+
+        def _candles_to_csv(candles: list) -> str:
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            w.writerow(["ts", "open", "high", "low", "close", "volume"])
+            for c in candles:
+                w.writerow([c.time.isoformat(), str(c.open), str(c.high), str(c.low), str(c.close), int(c.volume)])
+            return buf.getvalue()
+
+        def _candles_to_jsonl(candles: list) -> str:
+            lines = []
+            for c in candles:
+                lines.append(
+                    json.dumps(
+                        {
+                            "figi": c.figi,
+                            "ts": c.time.isoformat(),
+                            "open": str(c.open),
+                            "high": str(c.high),
+                            "low": str(c.low),
+                            "close": str(c.close),
+                            "volume": int(c.volume),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            return "\n".join(lines) + "\n"
+
+        # Decide required series by strategy
+        s = strategy.strip()
+        series: list[tuple[str, str, int]] = []  # (label, tf, total_days)
+
+        try:
+            if s in {"donchian_atr"}:
+                warm = max(_int(params.get("breakout_lookback", 20), 20), _int(params.get("exit_lookback", 10), 10), _int(params.get("atr_period", 14), 14)) + 5
+                total = days + warm
+                series.append(("candles_D1", "D1", total))
+            elif s in {"ema_atr"}:
+                warm = max(_int(params.get("ema_fast", 20), 20), _int(params.get("ema_slow", 50), 50), _int(params.get("atr_period", 14), 14)) + 5
+                total = days + warm
+                series.append(("candles_D1", "D1", total))
+            elif s in {"trend_breakout_atr"}:
+                tf = _tf_norm(params.get("timeframe", "1h"))
+                if tf in {"1min", "5min"}:
+                    return _json_response({"ok": False, "error": "Для trend_breakout_atr поддерживаются только timeframe 1h/4h."}, status=400)
+                w_tf = max(
+                    _int(params.get("breakout_lookback", 20), 20),
+                    _int(params.get("exit_lookback", 10), 10),
+                    _int(params.get("atr_period", 14), 14),
+                    _int(params.get("volume_window", 20), 20),
+                ) + 10
+                total_tf = days + _warmup_days_from_bars(tf, w_tf)
+                d1_w = max(_int(params.get("trend_ema_fast", 20), 20), _int(params.get("trend_ema_slow", 50), 50)) + 10
+                total_d1 = days + d1_w
+                series.append((f"candles_{tf}", tf, total_tf))
+                series.append(("candles_D1", "D1", total_d1))
+            elif s in {"intraday_vwap_momentum"}:
+                tf = _tf_norm(params.get("timeframe", "1min"))
+                if tf not in {"1min", "5min"}:
+                    return _json_response({"ok": False, "error": "Для intraday_vwap_momentum timeframe должен быть 1min или 5min."}, status=400)
+                guard = _guard_days(tf, days)
+                if guard:
+                    return _json_response({"ok": False, "error": guard}, status=400)
+                # vwap_bars: use vwap_window (bars) if provided, else vwap_period(minutes)/bar_minutes
+                vwap_window = params.get("vwap_window", None)
+                if vwap_window is not None:
+                    vwap_bars = max(1, _int(vwap_window, 1))
+                else:
+                    vwap_period_min = max(1, _int(params.get("vwap_period", 30), 30))
+                    vwap_bars = int(math.ceil(vwap_period_min / max(1, (_bar_minutes(tf)))))
+                w_tf = max(
+                    vwap_bars,
+                    _int(params.get("ema_fast", 5), 5),
+                    _int(params.get("ema_slow", 20), 20),
+                    _int(params.get("atr_period", 14), 14),
+                    _int(params.get("volume_window", 20), 20),
+                ) + 10
+                total_tf = days + _warmup_days_from_bars(tf, w_tf)
+                series.append((f"candles_{tf}", tf, total_tf))
+
+                tr_tf_raw = params.get("trend_timeframe", None)
+                if tr_tf_raw:
+                    tr_tf = _tf_norm(tr_tf_raw)
+                    if tr_tf not in {"1h", "4h"}:
+                        return _json_response({"ok": False, "error": "trend_timeframe должен быть 1h/4h или null."}, status=400)
+                    w_tr = max(_int(params.get("trend_ema_fast", 20), 20), _int(params.get("trend_ema_slow", 50), 50)) + 10
+                    total_tr = days + _warmup_days_from_bars(tr_tf, w_tr)
+                    series.append((f"candles_trend_{tr_tf}", tr_tf, total_tr))
+            elif s in {"intraday_bollinger_rsi"}:
+                tf = _tf_norm(params.get("timeframe", "5min"))
+                if tf not in {"1min", "5min"}:
+                    return _json_response({"ok": False, "error": "Для intraday_bollinger_rsi timeframe должен быть 1min или 5min."}, status=400)
+                guard = _guard_days(tf, days)
+                if guard:
+                    return _json_response({"ok": False, "error": guard}, status=400)
+                w_tf = max(
+                    _int(params.get("bollinger_period", 20), 20),
+                    _int(params.get("rsi_period", 14), 14),
+                    _int(params.get("atr_period", 14), 14),
+                    _int(params.get("volume_window", 30), 30),
+                ) + 10
+                total_tf = days + _warmup_days_from_bars(tf, w_tf)
+                series.append((f"candles_{tf}", tf, total_tf))
+            else:
+                return _json_response({"ok": False, "error": f"Неизвестная стратегия: {s}"}, status=400)
+        except ValueError as e:
+            return _json_response({"ok": False, "error": str(e)}, status=400)
+
+        await broker_client.ainit()
+        repo = CandleRepository(broker=broker_client)
+
+        # If a single series is required, return it directly (more convenient).
+        ts_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        ext = "jsonl" if fmt in {"jsonl", "ndjson"} else "csv"
+        if len(series) == 1:
+            label, tf, total = series[0]
+            try:
+                data = await _fetch(tf, int(total))
+            except asyncio.TimeoutError:
+                return _json_response({"ok": False, "error": "Таймаут при загрузке свечей. Попробуйте уменьшить days."}, status=504)
+            if not data:
+                return _json_response(
+                    {
+                        "ok": False,
+                        "error": "Свечи не найдены. Проверьте FIGI и доступность истории.",
+                        "debug": {"figi": figi, "timeframe": tf, "total_days": int(total)},
+                    },
+                    status=404,
+                )
+            content = _candles_to_jsonl(data) if fmt in {"jsonl", "ndjson"} else _candles_to_csv(data)
+            filename = f"{label}_{s}_{figi}_{days}d_{ts_stamp}.{ext}"
+            headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+            if fmt in {"jsonl", "ndjson"}:
+                return web.Response(text=content, content_type="application/x-ndjson", headers=headers)
+            return web.Response(text=content, content_type="text/csv", headers=headers)
+
+        # Fetch and build zip (multi-series strategies)
+        zip_name = f"candles_{s}_{figi}_{days}d_{ts_stamp}.zip"
+
+        meta = {
+            "figi": figi,
+            "strategy": s,
+            "days": days,
+            "format": ("jsonl" if fmt in {"jsonl", "ndjson"} else "csv"),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "params": params,
+            "files": [],
+        }
+
+        zbuf = io.BytesIO()
+        try:
+            with zipfile.ZipFile(zbuf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+                for label, tf, total in series:
+                    data = await _fetch(tf, int(total))
+                    if not data:
+                        return _json_response(
+                            {
+                                "ok": False,
+                                "error": "Свечи не найдены. Проверьте FIGI и доступность истории.",
+                                "debug": {"figi": figi, "timeframe": tf, "total_days": int(total)},
+                            },
+                            status=404,
+                        )
+                    content = _candles_to_jsonl(data) if fmt in {"jsonl", "ndjson"} else _candles_to_csv(data)
+                    fname = f"{label}.{ext}"
+                    z.writestr(fname, content.encode("utf-8"))
+                    meta["files"].append(
+                        {
+                            "name": fname,
+                            "timeframe": tf,
+                            "total_days": int(total),
+                            "candles": len(data),
+                            "first_ts": data[0].time.isoformat() if data else None,
+                            "last_ts": data[-1].time.isoformat() if data else None,
+                        }
+                    )
+                z.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8"))
+        except asyncio.TimeoutError:
+            return _json_response({"ok": False, "error": "Таймаут при загрузке свечей. Попробуйте уменьшить days."}, status=504)
+
+        headers = {"Content-Disposition": f'attachment; filename="{zip_name}"'}
+        return web.Response(body=zbuf.getvalue(), content_type="application/zip", headers=headers)
 
     async def handle_backtest_run(self, request: web.Request) -> web.Response:
         """
@@ -2165,10 +2781,113 @@ class UiServer:
 
             # Quick diagnostics: how many raw entry signals exist if we ignore position state (pos=0 always)
             raw_entries = 0
+            diag = {
+                "bars_total": len(candles),
+                "bars_warmup_ok": 0,
+                "bars_in_session": 0,
+                "bars_volume_ok": 0,
+                "bars_trend_bull": 0,
+                "bars_trend_bear": 0,
+                "vwap_cross_up": 0,
+                "vwap_cross_down": 0,
+                "bias_long": 0,
+                "bias_short": 0,
+                "fast_up": 0,
+                "fast_down": 0,
+                "entries_long": 0,
+                "entries_short": 0,
+            }
             try:
+                from zoneinfo import ZoneInfo
+
+                from app.strategies.indicators import average_volume, vwap_close
+                from app.strategies.positional.indicators import ema
+
+                msk = ZoneInfo("Europe/Moscow")
+
+                def _in_sessions(ts: datetime) -> bool:
+                    try:
+                        t = ts.astimezone(msk).time()
+                    except Exception:
+                        t = ts.time()
+                    for a, b in vm_cfg.trade_sessions:
+                        try:
+                            sh, sm = a.split(":")
+                            eh, em = b.split(":")
+                            start_t = datetime(2000, 1, 1, int(sh), int(sm)).time()
+                            end_t = datetime(2000, 1, 1, int(eh), int(em)).time()
+                        except Exception:
+                            continue
+                        if start_t <= t <= end_t:
+                            return True
+                    return False
+
+                vwap_bars = int(vm_cfg.vwap_window) if vm_cfg.vwap_window is not None else None
+                if vwap_bars is None:
+                    # derive from minutes period (legacy)
+                    bm = 1 if tf_norm == "1min" else 5
+                    vwap_bars = max(1, int((int(vm_cfg.vwap_period) + bm - 1) // bm))
+
+                closes_all = [c.close for c in candles]
+                ef_all = ema(closes_all, int(vm_cfg.ema_fast))
+                es_all = ema(closes_all, int(vm_cfg.ema_slow))
+                vwap_all = vwap_close(candles, int(vwap_bars))
+
                 for i in range(len(candles)):
                     w = candles[: i + 1]
                     td = _trend_dir_for_ts(w[-1].time) if w else 0
+                    if td == 1:
+                        diag["bars_trend_bull"] += 1
+                    elif td == -1:
+                        diag["bars_trend_bear"] += 1
+
+                    # Warmup check (same as strategy needs + cross)
+                    if i < 2:
+                        continue
+                    vwap_now = vwap_all[i] if i < len(vwap_all) else None
+                    vwap_prev = vwap_all[i - 1] if (i - 1) < len(vwap_all) else None
+                    if vwap_now is None or vwap_prev is None:
+                        continue
+                    if i >= len(ef_all) or i >= len(es_all) or i < 1:
+                        continue
+                    diag["bars_warmup_ok"] += 1
+
+                    c = candles[i]
+                    pprev = candles[i - 1]
+
+                    in_sess = _in_sessions(c.time)
+                    if in_sess:
+                        diag["bars_in_session"] += 1
+
+                    # volume filter
+                    vol_ok = True
+                    if vm_cfg.min_volume_ratio is not None and vm_cfg.min_volume_ratio > 0:
+                        avg_v = average_volume(w, int(vm_cfg.volume_window), include_last=False)
+                        vol_ok = bool(avg_v is not None and avg_v > 0 and (Decimal(int(c.volume)) / avg_v) >= Decimal(str(vm_cfg.min_volume_ratio)))
+                    if vol_ok:
+                        diag["bars_volume_ok"] += 1
+
+                    fast_now, fast_prev = ef_all[i], ef_all[i - 1]
+                    slow_now = es_all[i]
+                    if fast_now > fast_prev:
+                        diag["fast_up"] += 1
+                    if fast_now < fast_prev:
+                        diag["fast_down"] += 1
+
+                    cross_up = (pprev.close < vwap_prev) and (c.close > vwap_now)
+                    cross_down = (pprev.close > vwap_prev) and (c.close < vwap_now)
+                    if cross_up:
+                        diag["vwap_cross_up"] += 1
+                    if cross_down:
+                        diag["vwap_cross_down"] += 1
+
+                    long_bias = (c.close > vwap_now) and (fast_now > slow_now)
+                    short_bias = (c.close < vwap_now) and (fast_now < slow_now)
+                    if long_bias:
+                        diag["bias_long"] += 1
+                    if short_bias:
+                        diag["bias_short"] += 1
+
                     s0 = st.generate_signal(
                         candles=w,
                         current_position_qty=0,
@@ -2177,8 +2896,13 @@ class UiServer:
                     )
                     if s0 is not None and int(getattr(s0, "target_qty", 0)) != 0:
                         raw_entries += 1
+                        if int(getattr(s0, "target_qty", 0)) > 0:
+                            diag["entries_long"] += 1
+                        else:
+                            diag["entries_short"] += 1
             except Exception:  # noqa: BLE001
                 raw_entries = -1
+                diag = {"error": "diag_failed"}
 
             res = run_backtest_target_qty(figi=figi, strategy_name=strat.value, candles=candles, signal_fn=sig_fn, cfg=bt_cfg)
             summ = summarize(res.trades, res.equity)
@@ -2213,6 +2937,7 @@ class UiServer:
                         "trend_timeframe": tf_trend if tf_trend in {"1h", "4h"} else None,
                         "trend_candles": len(trend_ts) if trend_ts else 0,
                         "raw_entry_signals_pos0": raw_entries,
+                        "filters": diag,
                     },
                     "trades": [t.__dict__ for t in res.trades[-200:]],
                     "equity": [p.__dict__ for p in res.equity[-2000:]],
@@ -2868,6 +3593,8 @@ async def start_ui_server(*, store: StateStore, host: str, port: int) -> web.App
     app.router.add_post("/api/jobs/stop", srv.handle_job_stop)
     app.router.add_get("/api/jobs/decisions", srv.handle_job_decisions)
     app.router.add_get("/api/broker/futures/search", srv.handle_futures_search)
+    app.router.add_get("/api/candles/export", srv.handle_candles_export)
+    app.router.add_post("/api/candles/export/strategy", srv.handle_candles_export_strategy)
     app.router.add_post("/api/backtest/run", srv.handle_backtest_run)
     app.router.add_get("/api/strategies", srv.handle_strategies)
     app.router.add_get("/api/positions", srv.handle_positions)

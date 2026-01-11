@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -11,6 +12,7 @@ from app.client import client as broker_client
 from app.instruments_config.parser import get_instruments
 from core.backtest.engine import BacktestConfig, run_backtest_target_qty
 from core.data.candles import CandleRepository
+from core.models.entities import Candle
 from reports.stats import summarize
 from reports.trade_log import write_equity_csv, write_summary_json, write_trades_csv
 from app.strategies.positional.donchian_atr import DonchianATRStrategy, DonchianAtrConfig
@@ -29,6 +31,66 @@ def _parse_dt(s: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _load_candles_file(path: Path, *, figi_fallback: str) -> List[Candle]:
+    """
+    Load candles from file exported by UI:
+    - CSV: header ts,open,high,low,close,volume (optionally figi)
+    - JSONL: each line has ts/open/high/low/close/volume (optionally figi)
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(str(p))
+    ext = p.suffix.lower()
+    out: List[Candle] = []
+
+    if ext == ".csv":
+        with p.open("r", encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            for row in r:
+                ts = (row.get("ts") or row.get("time") or "").strip()
+                if not ts:
+                    continue
+                figi = (row.get("figi") or figi_fallback).strip()
+                out.append(
+                    Candle(
+                        figi=figi,
+                        time=_parse_dt(ts),
+                        open=Decimal(str(row.get("open"))),
+                        high=Decimal(str(row.get("high"))),
+                        low=Decimal(str(row.get("low"))),
+                        close=Decimal(str(row.get("close"))),
+                        volume=int(Decimal(str(row.get("volume") or "0"))),
+                    )
+                )
+    elif ext in {".jsonl", ".ndjson"}:
+        with p.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                ts = str(row.get("ts") or row.get("time") or "").strip()
+                if not ts:
+                    continue
+                figi = str(row.get("figi") or figi_fallback).strip()
+                out.append(
+                    Candle(
+                        figi=figi,
+                        time=_parse_dt(ts),
+                        open=Decimal(str(row.get("open"))),
+                        high=Decimal(str(row.get("high"))),
+                        low=Decimal(str(row.get("low"))),
+                        close=Decimal(str(row.get("close"))),
+                        volume=int(row.get("volume") or 0),
+                    )
+                )
+    else:
+        raise ValueError("Unsupported candles file extension. Use .csv or .jsonl/.ndjson")
+
+    out.sort(key=lambda c: c.time)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="instruments_config.json")
@@ -37,6 +99,11 @@ def main():
     ap.add_argument("--from", dest="from_dt", default=None)
     ap.add_argument("--to", dest="to_dt", default=None)
     ap.add_argument("--initial-equity", default="1000000")
+    ap.add_argument(
+        "--candles-file",
+        default=None,
+        help="Путь к файлу свечей (CSV/JSONL), выгруженному из UI. Если задан — свечи берём из файла, без API.",
+    )
     args = ap.parse_args()
 
     cfg = get_instruments(args.config)
@@ -47,8 +114,14 @@ def main():
     import asyncio
 
     async def _run():
-        await broker_client.ainit()
-        repo = CandleRepository(broker=broker_client)
+        candles_from_file: Optional[List[Candle]] = None
+        if args.candles_file:
+            if not args.figi:
+                raise SystemExit("--figi обязателен при использовании --candles-file")
+            candles_from_file = _load_candles_file(Path(args.candles_file), figi_fallback=str(args.figi))
+        else:
+            await broker_client.ainit()
+            repo = CandleRepository(broker=broker_client)
 
         for inst in cfg.instruments:
             if args.figi and inst.figi != args.figi:
@@ -61,20 +134,29 @@ def main():
             # Fetch candles (uses sdk history cache if enabled in app settings)
             # For deterministic runs, user should freeze a time interval by --to.
             to = _parse_dt(args.to_dt) if args.to_dt else datetime.now(timezone.utc)
-            if sname in {"intraday_vwap_momentum", "intraday_bollinger_rsi"}:
-                tf = str(inst.strategy.parameters.get("timeframe", "1min"))
+            if candles_from_file is not None:
+                candles = list(candles_from_file)
+                # Optional time window filter
                 if args.from_dt:
                     from_ts = _parse_dt(args.from_dt)
-                    candles = await repo.fetch_intraday_range(figi=inst.figi, from_ts=from_ts, to_ts=to, timeframe=tf)
-                else:
-                    # best-effort: last ~2-5 trading days depending on tf
-                    candles_n = 3000 if tf.lower().strip() == "1min" else 1200
-                    res = await repo.fetch_last_intraday(figi=inst.figi, n=candles_n, timeframe=tf, to=to)
-                    candles = res.candles
+                    candles = [c for c in candles if c.time >= from_ts]
+                if args.to_dt:
+                    candles = [c for c in candles if c.time <= to]
             else:
-                candles_n = 400  # enough for D1 indicators
-                res = await repo.fetch_last_d1(figi=inst.figi, n=candles_n, to=to)
-                candles = res.candles
+                if sname in {"intraday_vwap_momentum", "intraday_bollinger_rsi"}:
+                    tf = str(inst.strategy.parameters.get("timeframe", "1min"))
+                    if args.from_dt:
+                        from_ts = _parse_dt(args.from_dt)
+                        candles = await repo.fetch_intraday_range(figi=inst.figi, from_ts=from_ts, to_ts=to, timeframe=tf)
+                    else:
+                        # best-effort: last ~2-5 trading days depending on tf
+                        candles_n = 3000 if tf.lower().strip() == "1min" else 1200
+                        res = await repo.fetch_last_intraday(figi=inst.figi, n=candles_n, timeframe=tf, to=to)
+                        candles = res.candles
+                else:
+                    candles_n = 400  # enough for D1 indicators
+                    res = await repo.fetch_last_d1(figi=inst.figi, n=candles_n, to=to)
+                    candles = res.candles
             if not candles:
                 continue
 
