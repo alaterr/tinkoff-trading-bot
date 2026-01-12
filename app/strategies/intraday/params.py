@@ -71,6 +71,12 @@ def parse_vwap_momentum_config(strategy_params: dict[str, Any] | None) -> VwapMo
         or cfg0.atr_regime_min_ratio,
         atr_regime_max_ratio=_vm_to_decimal(p.get("atr_regime_max_ratio", cfg0.atr_regime_max_ratio))
         or cfg0.atr_regime_max_ratio,
+        adx_period=int(p.get("adx_period", cfg0.adx_period)),
+        adx_min=_vm_to_decimal(p.get("adx_min", cfg0.adx_min)) or cfg0.adx_min,
+        bb_period=int(p.get("bb_period", cfg0.bb_period)),
+        bb_std_mult=_vm_to_decimal(p.get("bb_std_mult", cfg0.bb_std_mult)) or cfg0.bb_std_mult,
+        bb_width_lookback=int(p.get("bb_width_lookback", cfg0.bb_width_lookback)),
+        bb_width_mult=_vm_to_decimal(p.get("bb_width_mult", cfg0.bb_width_mult)) or cfg0.bb_width_mult,
         min_impulse_atr_mult=_vm_to_decimal(p.get("min_impulse_atr_mult", cfg0.min_impulse_atr_mult))
         or cfg0.min_impulse_atr_mult,
         min_vwap_dist_atr_mult=_vm_to_decimal(p.get("min_vwap_dist_atr_mult", cfg0.min_vwap_dist_atr_mult))

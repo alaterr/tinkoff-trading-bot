@@ -115,3 +115,68 @@ def donchian_low(candles: List[Candle], lookback: int) -> Optional[Decimal]:
     window = candles[-lookback:]
     return min(c.low for c in window)
 
+
+def bollinger_band_width(values: List[Decimal], period: int, std_mult: Decimal) -> Optional[Decimal]:
+    """
+    Bollinger Band Width (relative):
+      width = (upper - lower) / mid
+    Returns None if not enough data or mid==0.
+    """
+    mid = sma(values, period)
+    sd = std(values, period)
+    if mid is None or sd is None:
+        return None
+    if mid == 0:
+        return None
+    upper = mid + (std_mult * sd)
+    lower = mid - (std_mult * sd)
+    return (upper - lower) / abs(mid)
+
+
+def adx_simple(candles: List[Candle], period: int) -> Optional[Decimal]:
+    """
+    ADX (0..100), simplified (non-Wilder):
+    - Compute +DM/-DM and TR series
+    - Compute DX over each bar using *simple sums* over last `period`
+    - ADX is the average of DX over last `period`
+    This is deterministic and good enough as a regime filter.
+    """
+    if period <= 0:
+        raise ValueError("period must be > 0")
+    if len(candles) < (period * 2) + 2:
+        return None
+
+    trs: List[Decimal] = []
+    pdm: List[Decimal] = []
+    ndm: List[Decimal] = []
+    for i in range(1, len(candles)):
+        curr = candles[i]
+        prev = candles[i - 1]
+        up = curr.high - prev.high
+        down = prev.low - curr.low
+        plus = up if (up > 0 and up > down) else Decimal("0")
+        minus = down if (down > 0 and down > up) else Decimal("0")
+        trs.append(true_range(curr, prev))
+        pdm.append(plus)
+        ndm.append(minus)
+
+    dxs: List[Decimal] = []
+    # dx index aligned to candles index i (using i in trs/pdm/ndm == candle i+1)
+    for j in range(period, len(trs)):
+        tr_sum = sum(trs[j - period + 1 : j + 1])
+        if tr_sum <= 0:
+            continue
+        plus_sum = sum(pdm[j - period + 1 : j + 1])
+        minus_sum = sum(ndm[j - period + 1 : j + 1])
+        pdi = (Decimal("100") * plus_sum) / tr_sum
+        ndi = (Decimal("100") * minus_sum) / tr_sum
+        denom = pdi + ndi
+        if denom <= 0:
+            continue
+        dx = (Decimal("100") * abs(pdi - ndi)) / denom
+        dxs.append(dx)
+
+    if len(dxs) < period:
+        return None
+    return sum(dxs[-period:]) / Decimal(period)
+

@@ -9,7 +9,7 @@ from typing import List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 from app.strategies.indicators import average_volume, vwap_close
-from app.strategies.positional.indicators import atr, ema, true_range
+from app.strategies.positional.indicators import adx_simple, atr, bollinger_band_width, ema, true_range
 from core.models.entities import Candle, Signal, SignalType
 
 
@@ -71,6 +71,16 @@ class VwapMomentumConfig:
     atr_regime_period: int = 100
     atr_regime_min_ratio: Decimal = Decimal("0.6")
     atr_regime_max_ratio: Decimal = Decimal("1.8")
+
+    # Trend regime filter (ADX):
+    adx_period: int = 14
+    adx_min: Decimal = Decimal("0")  # set to 18..25 to trade only in trend
+
+    # Squeeze -> expansion filter (BB width):
+    bb_period: int = 20
+    bb_std_mult: Decimal = Decimal("2.0")
+    bb_width_lookback: int = 20
+    bb_width_mult: Decimal = Decimal("1.05")  # require width_now >= avg_width * mult
 
     # Quality filters to reduce losing trades:
     # Require entry candle impulse: TrueRange(last, prev) >= min_impulse_atr_mult * ATR
@@ -382,6 +392,30 @@ class VwapMomentumStrategy:
             # Require regime filter for entries (if long ATR available)
             if not atr_ratio_ok:
                 return None
+
+            # ADX filter (entries only)
+            if self.cfg.adx_min is not None and Decimal(str(self.cfg.adx_min)) > 0:
+                adx = adx_simple(candles, int(self.cfg.adx_period))
+                if adx is None or adx < Decimal(str(self.cfg.adx_min)):
+                    return None
+
+            # Bollinger width expansion filter (entries only)
+            if int(self.cfg.bb_width_lookback) > 0 and Decimal(str(self.cfg.bb_width_mult)) > 0:
+                closes_all = [c.close for c in candles]
+                width_now = bollinger_band_width(closes_all, int(self.cfg.bb_period), Decimal(str(self.cfg.bb_std_mult)))
+                if width_now is None:
+                    return None
+                widths: List[Decimal] = []
+                # compute a small trailing series (cost is small, periods are small)
+                start = max(0, len(closes_all) - (int(self.cfg.bb_width_lookback) + int(self.cfg.bb_period) + 5))
+                for k in range(start, len(closes_all)):
+                    w = bollinger_band_width(closes_all[: k + 1], int(self.cfg.bb_period), Decimal(str(self.cfg.bb_std_mult)))
+                    if w is not None:
+                        widths.append(w)
+                if len(widths) >= int(self.cfg.bb_width_lookback):
+                    avg_w = sum(widths[-int(self.cfg.bb_width_lookback) :]) / Decimal(int(self.cfg.bb_width_lookback))
+                    if avg_w > 0 and width_now < (avg_w * Decimal(str(self.cfg.bb_width_mult))):
+                        return None
             # VWAP cross conditions
             cross_up = (prev.close < vwap_prev) and (last.close > vwap_now)
             cross_down = (prev.close > vwap_prev) and (last.close < vwap_now)
