@@ -2764,9 +2764,11 @@ class UiServer:
                 nonlocal stop_price, peak_price, trough_price
                 stop_price, peak_price, trough_price = update_vwap_trailing_stop(
                     direction=direction,
+                    entry_price=entry_price,
                     close=close,
                     atr_value=atr_value,
                     atr_trail_mult=vm_cfg.atr_trail_mult,
+                    activate_profit_mult=(vm_cfg.atr_trail_mult if int(vm_cfg.breakout_lookback) > 0 else Decimal("0")),
                     stop_price=stop_price,
                     peak_price=peak_price,
                     trough_price=trough_price,

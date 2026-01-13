@@ -9,7 +9,7 @@ from typing import List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 from app.strategies.indicators import average_volume, vwap_close
-from app.strategies.positional.indicators import adx_simple, atr, bollinger_band_width, ema, true_range
+from app.strategies.positional.indicators import adx_simple, atr, bollinger_band_width, donchian_high, donchian_low, ema, true_range
 from core.models.entities import Candle, Signal, SignalType
 
 
@@ -34,6 +34,8 @@ class VwapMomentumConfig:
     retest_lookback: int = 10
     # Optional: require a micro-breakout on retest (close > prev.high for long / close < prev.low for short)
     require_retest_breakout: bool = True
+    # Optional: require a micro-breakout on VWAP cross entries too (reduces whipsaws around VWAP)
+    require_cross_breakout: bool = True
     # Retest strictness: require last.low/last.high to touch VWAP within ATR band.
     # Set to 0 to disable and use only lookback condition.
     retest_touch_atr_mult: Decimal = Decimal("0.15")
@@ -42,6 +44,9 @@ class VwapMomentumConfig:
     trend_ema_fast: int = 20
     trend_ema_slow: int = 50
     atr_period: int = 14
+    # Breakout confirmation (FX futures intraday):
+    # If breakout_lookback > 0, entries require close to break VWAP AND Donchian channel (prev N bars).
+    breakout_lookback: int = 0
     # fixed SL/TP in "points" (interpreted as ticks by runner)
     sl_points: Optional[Decimal] = Decimal("50")
     tp_points: Optional[Decimal] = Decimal("100")
@@ -56,6 +61,9 @@ class VwapMomentumConfig:
     min_volume_ratio: Decimal = Decimal("1.5")
     trade_sessions: Tuple[Tuple[str, str], ...] = (("10:00", "17:00"),)  # MSK
     cooldown_bars: int = 3
+    # Optional "cooldown after losses" (handled by runner, persisted in StateStore):
+    loss_streak_pause_after: int = 0  # set to 3
+    loss_streak_cooldown_bars: int = 5
     exit_before_session_end_minutes: int = 5
     # Exit tuning (to reduce noise):
     # - exit_confirm_bars: require EMA-fast/slow opposite condition for N consecutive bars before exit
@@ -292,6 +300,22 @@ class VwapMomentumStrategy:
         short_bias = (last.close < vwap_now) and (fast_now < slow_now)
 
         # Exits (deterministic, close-based): VWAP cross against + EMA confirm bars
+        # Trend reversal exit (higher TF): if trend filter flips against the current position -> flat.
+        if current_position_qty != 0 and trend_direction in (-1, 1):
+            if (current_position_qty > 0 and trend_direction < 0) or (current_position_qty < 0 and trend_direction > 0):
+                self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
+                return Signal(
+                    strategy_name=strategy_name,
+                    figi=self.figi,
+                    ts=last.time,
+                    signal_type=SignalType.TARGET_QTY,
+                    target_qty=0,
+                    reason="exit: trend reversal (higher TF)",
+                    atr=a,
+                    risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
+                    sl_points=_to_decimal(self.cfg.sl_points),
+                    tp_points=_to_decimal(self.cfg.tp_points),
+                )
         if current_position_qty > 0:
             if int(self.cfg.max_hold_bars) > 0 and self._hold_bars >= int(self.cfg.max_hold_bars):
                 self._cooldown_left = max(0, int(self.cfg.cooldown_bars))
@@ -419,6 +443,9 @@ class VwapMomentumStrategy:
             # VWAP cross conditions
             cross_up = (prev.close < vwap_prev) and (last.close > vwap_now)
             cross_down = (prev.close > vwap_prev) and (last.close < vwap_now)
+            if self.cfg.require_cross_breakout:
+                cross_up = cross_up and (last.close > prev.high)
+                cross_down = cross_down and (last.close < prev.low)
 
             fast_up = fast_now > fast_prev
             fast_down = fast_now < fast_prev
@@ -433,8 +460,15 @@ class VwapMomentumStrategy:
             # Retest logic (more trades): recently on the other side of VWAP, now reclaimed.
             w = max(1, int(self.cfg.retest_lookback))
             recent = candles[-(w + 1) : -1] if len(candles) >= (w + 1) else candles[:-1]
-            min_low = min((c.low for c in recent), default=last.low)
-            max_high = max((c.high for c in recent), default=last.high)
+            # IMPORTANT: compare vs VWAP at the time of each candle, not vs current VWAP.
+            # Using current VWAP here creates false retest signals when VWAP drifts.
+            recent_idxs = list(range(max(0, len(candles) - (w + 1)), max(0, len(candles) - 1)))
+            was_below_vwap = any(
+                (vwap_vals[i] is not None) and (candles[i].close < vwap_vals[i]) for i in recent_idxs
+            )
+            was_above_vwap = any(
+                (vwap_vals[i] is not None) and (candles[i].close > vwap_vals[i]) for i in recent_idxs
+            )
             # Stricter retest: pullback touches VWAP (within ATR band) and closes back on the trend side.
             touch_band = Decimal("0")
             if a is not None and a > 0:
@@ -442,8 +476,8 @@ class VwapMomentumStrategy:
             touched_long = (last.low <= (vwap_now + touch_band)) and (last.close > vwap_now)
             touched_short = (last.high >= (vwap_now - touch_band)) and (last.close < vwap_now)
 
-            retest_up = (min_low < vwap_now) and touched_long
-            retest_down = (max_high > vwap_now) and touched_short
+            retest_up = was_below_vwap and touched_long
+            retest_down = was_above_vwap and touched_short
             if self.cfg.require_retest_breakout:
                 retest_up = retest_up and (last.close > prev.high)
                 retest_down = retest_down and (last.close < prev.low)
@@ -459,6 +493,18 @@ class VwapMomentumStrategy:
                 (cross_down if mode in {"cross", "cross_or_retest"} else False)
                 or (retest_down if mode in {"retest", "cross_or_retest"} else False)
             )
+
+            # FX breakout mode (VWAP + Donchian breakout confirmation):
+            # If breakout_lookback > 0, override entry logic with strict breakout rules.
+            if int(self.cfg.breakout_lookback) > 0:
+                lb = int(self.cfg.breakout_lookback)
+                prev_bars = candles[:-1]
+                hi = donchian_high(prev_bars, lb)
+                lo = donchian_low(prev_bars, lb)
+                if hi is None or lo is None:
+                    return None
+                long_entry = allow_long and (last.close > vwap_now) and (last.close > hi)
+                short_entry = allow_short and (last.close < vwap_now) and (last.close < lo)
 
             # Extra quality filters (ATR-based), applied only for entries
             if (long_entry or short_entry) and a is not None and a > 0:

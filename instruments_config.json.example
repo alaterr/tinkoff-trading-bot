@@ -18,24 +18,28 @@
       "strategy": {
         "name": "intraday_vwap_momentum",
         "parameters": {
-          "timeframe": "1min",
+          "timeframe": "5min",
           "vwap_period": 30,
-          "ema_fast": 5,
-          "ema_slow": 20,
+          "breakout_lookback": 10,
+          "ema_fast_1h": 20,
+          "ema_slow_1h": 50,
           "atr_period": 14,
-          "sl_points": 50,
-          "tp_points": 100,
-          "risk_per_trade_pct": 0.3,
+          "atr_stop_mult": "2.0",
+          "atr_tp_mult": "4.0",
+          "atr_trail_mult": "3.0",
+          "risk_per_trade_pct": 0.4,
           "volume_window": 20,
           "min_volume_ratio": 1.5,
-          "trade_sessions": [["10:00", "17:00"]],
-          "cooldown_bars": 3
+          "trade_sessions": [["10:15", "17:00"]],
+          "exit_before_close_minutes": 15,
+          "loss_streak_pause_after": 3,
+          "loss_streak_cooldown_bars": 5
         }
       },
       "risk": {
         "max_position_qty": 3,
-        "max_daily_loss_rub": 10000,
-        "max_trades_per_day": 20
+        "max_trades_per_day": 12,
+        "max_daily_loss_pct": 2.0
       }
     }
   ]

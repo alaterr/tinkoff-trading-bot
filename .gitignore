@@ -6,6 +6,7 @@ instruments_config.json
 
 market_data_cache/
 datasets/
+backtest_reports_local/
 tests/**/*.txt
 stats.db
 

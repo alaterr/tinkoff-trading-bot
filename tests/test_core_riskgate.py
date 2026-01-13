@@ -81,3 +81,25 @@ def test_atr_sizing_caps_qty():
     assert d.intent is not None
     assert d.intent.intended_qty == 1
 
+
+def test_max_daily_loss_pct_blocks():
+    rg = RiskGate(global_risk=GlobalRiskConfig(max_daily_loss_rub=0.0, max_daily_loss_pct=2.0))
+    sig = Signal(
+        strategy_name="intraday_vwap_momentum",
+        figi="FIGI1",
+        ts=datetime(2026, 1, 10, 10, 0, tzinfo=timezone.utc),
+        signal_type=SignalType.TARGET_QTY,
+        target_qty=1,
+    )
+    # Baseline equity ~ 100k, daily loss 2500 => 2.5% > 2% => block
+    d = rg.check(
+        signal=sig,
+        instrument=_instrument(instrument_type="futures", max_order_qty=10),
+        current_position_qty=0,
+        open_positions_total=0,
+        equity_rub=Decimal("97500"),
+        daily_loss_rub=Decimal("2500"),
+    )
+    assert d.allowed is False
+    assert "max_daily_loss_pct" in d.reason
+

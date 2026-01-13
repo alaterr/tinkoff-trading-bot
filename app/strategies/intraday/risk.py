@@ -142,9 +142,11 @@ def levels_vwap(
 def update_vwap_trailing_stop(
     *,
     direction: int,
+    entry_price: Optional[Decimal],
     close: Decimal,
     atr_value: Optional[Decimal],
     atr_trail_mult: Optional[Decimal],
+    activate_profit_mult: Optional[Decimal] = None,
     stop_price: Optional[Decimal],
     peak_price: Optional[Decimal],
     trough_price: Optional[Decimal],
@@ -163,6 +165,21 @@ def update_vwap_trailing_stop(
         return stop_price, peak_price, trough_price
 
     dist = atr_value * atr_trail_mult
+    # Activation: only start moving stop once trade has at least `activate_profit_mult` * ATR unrealized profit.
+    # If activate_profit_mult is None -> use atr_trail_mult (FX spec: start trailing after profit == trail distance).
+    act = activate_profit_mult
+    if act is None:
+        act = atr_trail_mult
+    if act is not None and act > 0 and entry_price is not None:
+        need_profit = atr_value * act
+        profit = (close - entry_price) if direction > 0 else (entry_price - close)
+        if profit < need_profit:
+            # Still update peak/trough bookkeeping, but do not tighten stop yet.
+            if direction > 0:
+                peak = close if peak_price is None else max(peak_price, close)
+                return stop_price, peak, None
+            trough = close if trough_price is None else min(trough_price, close)
+            return stop_price, None, trough
     if direction > 0:
         peak = close if peak_price is None else max(peak_price, close)
         trail = peak - dist

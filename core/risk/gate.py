@@ -79,6 +79,16 @@ class RiskGate:
             if getattr(inst_risk, "max_weekly_loss_rub", None) is not None
             else Decimal(str(self._global.max_weekly_loss_rub))
         )
+        max_daily_loss_pct = (
+            Decimal(str(getattr(inst_risk, "max_daily_loss_pct", None)))
+            if getattr(inst_risk, "max_daily_loss_pct", None) is not None
+            else Decimal(str(getattr(self._global, "max_daily_loss_pct", 0.0) or 0.0))
+        )
+        max_weekly_loss_pct = (
+            Decimal(str(getattr(inst_risk, "max_weekly_loss_pct", None)))
+            if getattr(inst_risk, "max_weekly_loss_pct", None) is not None
+            else Decimal(str(getattr(self._global, "max_weekly_loss_pct", 0.0) or 0.0))
+        )
 
         if trades_today is not None and trades_today >= max_trades_per_day:
             return RiskDecision(
@@ -91,18 +101,44 @@ class RiskGate:
                 reason=f"max_trades_per_week reached ({max_trades_per_week})",
             )
 
-        if max_daily_loss_rub > 0 and daily_loss_rub is not None:
-            if daily_loss_rub >= max_daily_loss_rub:
-                return RiskDecision(
-                    allowed=False,
-                    reason=f"max_daily_loss_rub reached ({max_daily_loss_rub})",
-                )
+        # Daily loss limits:
+        # - absolute RUB: max_daily_loss_rub
+        # - percent-of-equity (baseline): max_daily_loss_pct
+        if daily_loss_rub is not None:
+            if max_daily_loss_rub > 0 and daily_loss_rub >= max_daily_loss_rub:
+                return RiskDecision(allowed=False, reason=f"max_daily_loss_rub reached ({max_daily_loss_rub})")
+            if (
+                max_daily_loss_rub <= 0
+                and max_daily_loss_pct is not None
+                and max_daily_loss_pct > 0
+                and equity_rub is not None
+            ):
+                # Normalize percent-like values: 2.0 -> 2%
+                pct = max_daily_loss_pct / Decimal("100") if max_daily_loss_pct >= Decimal("0.1") else max_daily_loss_pct
+                # Baseline equity for the day ~ current equity + drawdown so far
+                baseline = equity_rub + daily_loss_rub
+                limit = baseline * pct
+                if limit > 0 and daily_loss_rub >= limit:
+                    return RiskDecision(allowed=False, reason=f"max_daily_loss_pct reached ({max_daily_loss_pct})")
         if max_weekly_loss_rub > 0 and weekly_loss_rub is not None:
             if weekly_loss_rub >= max_weekly_loss_rub:
                 return RiskDecision(
                     allowed=False,
                     reason=f"max_weekly_loss_rub reached ({max_weekly_loss_rub})",
                 )
+        # Weekly percent limit (only if *_rub is not set)
+        if (
+            max_weekly_loss_rub <= 0
+            and max_weekly_loss_pct is not None
+            and max_weekly_loss_pct > 0
+            and weekly_loss_rub is not None
+            and equity_rub is not None
+        ):
+            pct = max_weekly_loss_pct / Decimal("100") if max_weekly_loss_pct >= Decimal("0.1") else max_weekly_loss_pct
+            baseline = equity_rub + weekly_loss_rub
+            limit = baseline * pct
+            if limit > 0 and weekly_loss_rub >= limit:
+                return RiskDecision(allowed=False, reason=f"max_weekly_loss_pct reached ({max_weekly_loss_pct})")
 
         if open_positions_total >= self._global.max_positions_total and current_position_qty == 0:
             return RiskDecision(

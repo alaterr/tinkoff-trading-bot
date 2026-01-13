@@ -75,6 +75,28 @@ Interval is calculated by taking `interval_size` percents of the last prices
 for the last `days_back_to_consider` days. By default, it's set to 80 percents which means
 that the interval is from 10th to 90th percentile.
 
+### intraday_vwap_momentum (FX breakout mode)
+The same strategy name supports an additional **breakout mode** designed for intraday futures (e.g. USD/RUB).
+Enable it by setting `breakout_lookback > 0` and using `timeframe: "5min"`.
+
+- **Trend filter (1h)**: allow long only when higher-timeframe trend is bullish, short only when bearish
+  - Use `trend_timeframe: "1h"` and `trend_ema_fast` / `trend_ema_slow`
+  - Aliases from the spec are supported: `ema_fast_1h` / `ema_slow_1h`
+- **Entry (breakout_lookback > 0)**:
+  - long if `close > VWAP` AND `close > donchian_high(prev N bars)`
+  - short if `close < VWAP` AND `close < donchian_low(prev N bars)`
+  - volume filter via `volume_window` + `min_volume_ratio`
+- **Risk / exits**:
+  - ATR stops via `atr_sl_mult` (alias: `atr_stop_mult`)
+  - ATR take-profit via `atr_tp_mult`
+  - ATR trailing via `atr_trail_mult` (in breakout mode trailing activates after profit reaches `atr_trail_mult * ATR`)
+  - exit before session end via `exit_before_session_end_minutes` (alias: `exit_before_close_minutes`)
+
+#### Risk limits (config)
+Per-instrument risk overrides support both money and percent limits:
+- `max_daily_loss_rub` / `max_weekly_loss_rub`
+- `max_daily_loss_pct` / `max_weekly_loss_pct` (e.g. `2.0` means 2%)
+
 ## Get accounts tool
 This is the tool to get your Tinkoff accounts. Useful when you don't know your account id.
 To run use this command:

@@ -21,6 +21,9 @@ class GlobalRiskConfig(BaseModel):
     # Loss limits
     max_daily_loss_rub: float = 0.0
     max_weekly_loss_rub: float = 0.0
+    # Percent-of-equity loss limits (optional alternative to *_rub). Can be set like 0.02 (2%) or 2.0 (2%).
+    max_daily_loss_pct: float = 0.0
+    max_weekly_loss_pct: float = 0.0
 
     # Budgeting / safety
     risk_per_trade_pct: float = 0.01
@@ -37,6 +40,14 @@ class GlobalRiskConfig(BaseModel):
     def _non_negative_money(cls, v: float) -> float:
         if v < 0:
             raise ValueError("must be >= 0")
+        return v
+
+    @validator("max_daily_loss_pct", "max_weekly_loss_pct")
+    def _non_negative_pct(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("must be >= 0")
+        if v > 100:
+            raise ValueError("too large, sanity check failed")
         return v
 
     @validator("risk_per_trade_pct")
@@ -108,6 +119,8 @@ class InstrumentRiskOverrideConfig(BaseModel):
     max_trades_per_week: Optional[int] = None
     max_daily_loss_rub: Optional[float] = None
     max_weekly_loss_rub: Optional[float] = None
+    max_daily_loss_pct: Optional[float] = None
+    max_weekly_loss_pct: Optional[float] = None
 
     # Optional per-instrument risk fraction override (0..1 or percent-like)
     risk_per_trade_pct: Optional[float] = None
@@ -126,6 +139,16 @@ class InstrumentRiskOverrideConfig(BaseModel):
             return v
         if v < 0:
             raise ValueError("must be >= 0")
+        return v
+
+    @validator("max_daily_loss_pct", "max_weekly_loss_pct")
+    def _non_negative_pct_opt(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return v
+        if v < 0:
+            raise ValueError("must be >= 0")
+        if v > 100:
+            raise ValueError("too large, sanity check failed")
         return v
 
     @validator("risk_per_trade_pct")

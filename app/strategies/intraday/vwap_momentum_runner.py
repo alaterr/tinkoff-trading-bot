@@ -19,6 +19,7 @@ from app.strategies.intraday.risk import (
     risk_stop_rub_vwap,
     update_vwap_trailing_stop,
 )
+from app.strategies.positional.indicators import atr as atr_ind
 from core.data.candles import CandleRepository
 from core.futures.rollover import should_rollover
 from core.models.entities import OrderIntent, Signal, SignalType
@@ -288,13 +289,17 @@ class VwapMomentumRunner(BaseStrategy):
         stop = _to_decimal(stop_s)
         peak = _to_decimal(peak_s)
         trough = _to_decimal(trough_s)
+        entry = _to_decimal(self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="entry_price"))
 
         direction = 1 if current_qty > 0 else -1
         new_stop, new_peak, new_trough = update_vwap_trailing_stop(
             direction=direction,
+            entry_price=entry,
             close=last_close,
             atr_value=atr_value,
             atr_trail_mult=self.cfg.atr_trail_mult,
+            # In FX breakout mode we typically want to start trailing after profit reaches trail distance.
+            activate_profit_mult=(self.cfg.atr_trail_mult if int(self.cfg.breakout_lookback) > 0 else Decimal("0")),
             stop_price=stop,
             peak_price=peak,
             trough_price=trough,
@@ -362,7 +367,13 @@ class VwapMomentumRunner(BaseStrategy):
                     continue
 
                 now_utc = datetime.now(timezone.utc)
-                cd_until = self.store.get_cooldown_until()
+                cd_until_global = self.store.get_cooldown_until(key="global")
+                cd_until_job = self.store.get_cooldown_until(key=self._job_id())
+                cd_until = None
+                if cd_until_global and cd_until_job:
+                    cd_until = cd_until_global if cd_until_global > cd_until_job else cd_until_job
+                else:
+                    cd_until = cd_until_global or cd_until_job
                 if cd_until is not None and now_utc < cd_until:
                     await asyncio.sleep(min(self.runner_config.poll_seconds, 5))
                     continue
@@ -413,7 +424,11 @@ class VwapMomentumRunner(BaseStrategy):
 
                 # 1) Exit by stored SL/TP levels (close-based)
                 sig: Optional[Signal] = None
-                # Trailing stop update (best-effort). We'll use ATR from strategy signal if available.
+                # Trailing stop must be updated on EVERY bar while in position.
+                # Previously it was only updated when strategy emitted a signal, effectively disabling trailing most of the time.
+                atr_value = atr_ind(res.candles, int(self.cfg.atr_period)) if current_qty != 0 else None
+
+                # 1a) Exit by existing levels (before any updates)
                 if current_qty != 0 and self._maybe_exit_by_levels(current_qty=current_qty, close=last.close):
                     sig = Signal(
                         strategy_name=self.strategy_name,
@@ -426,6 +441,24 @@ class VwapMomentumRunner(BaseStrategy):
                         sl_points=_to_decimal(self.cfg.sl_points),
                         tp_points=_to_decimal(self.cfg.tp_points),
                     )
+                # 1b) Update trailing stop and re-check exit (close-based)
+                if sig is None and current_qty != 0:
+                    try:
+                        self._update_trailing_stop(current_qty=current_qty, last_close=last.close, atr_value=atr_value)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if self._maybe_exit_by_levels(current_qty=current_qty, close=last.close):
+                        sig = Signal(
+                            strategy_name=self.strategy_name,
+                            figi=self.figi,
+                            ts=last.time,
+                            signal_type=SignalType.TARGET_QTY,
+                            target_qty=0,
+                            reason="exit: SL/TP hit after trailing update (close-based)",
+                            risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
+                            sl_points=_to_decimal(self.cfg.sl_points),
+                            tp_points=_to_decimal(self.cfg.tp_points),
+                        )
 
                 # 2) Strategy signal (entry/ema exit/session exit)
                 if sig is None:
@@ -436,25 +469,6 @@ class VwapMomentumRunner(BaseStrategy):
                         trend_direction=trend_dir,
                         strategy_name=self.strategy_name,
                     )
-                    # If in position, update trailing stop using ATR computed by strategy.
-                    if current_qty != 0:
-                        try:
-                            self._update_trailing_stop(current_qty=current_qty, last_close=last.close, atr_value=getattr(sig, "atr", None))
-                        except Exception:  # noqa: BLE001
-                            pass
-                        # If trailing moved stop beyond close, exit on this bar close (deterministic).
-                        if self._maybe_exit_by_levels(current_qty=current_qty, close=last.close):
-                            sig = Signal(
-                                strategy_name=self.strategy_name,
-                                figi=self.figi,
-                                ts=last.time,
-                                signal_type=SignalType.TARGET_QTY,
-                                target_qty=0,
-                                reason="exit: SL/TP hit after trailing update (close-based)",
-                                risk_per_trade_pct=_to_decimal(self.cfg.risk_per_trade_pct),
-                                sl_points=_to_decimal(self.cfg.sl_points),
-                                tp_points=_to_decimal(self.cfg.tp_points),
-                            )
 
                 if sig is None:
                     self.store.set_kv(strategy_name=self.strategy_name, figi=self.figi, key="last_bar_ts", value=last.time.isoformat())
@@ -518,6 +532,43 @@ class VwapMomentumRunner(BaseStrategy):
 
                 # Levels management
                 if sig.target_qty == 0:
+                    # Loss-streak cooldown (best-effort): if we closed a position and PnL < 0, increment streak.
+                    # Uses close price (deterministic) and best-effort futures multiplier.
+                    if current_qty != 0 and int(self.cfg.loss_streak_pause_after) > 0:
+                        try:
+                            entry_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="entry_price")
+                            entry = _to_decimal(entry_s)
+                            if entry is not None:
+                                direction = 1 if current_qty > 0 else -1
+                                pnl = (last.close - entry) * Decimal(direction) * self._price_multiplier * Decimal(self._lot_size)
+                                streak_s = self.store.get_kv(strategy_name=self.strategy_name, figi=self.figi, key="loss_streak")
+                                streak = int(streak_s or "0")
+                                if pnl < 0:
+                                    streak += 1
+                                else:
+                                    streak = 0
+                                self.store.set_kv(
+                                    strategy_name=self.strategy_name,
+                                    figi=self.figi,
+                                    key="loss_streak",
+                                    value=str(streak),
+                                )
+                                if streak >= int(self.cfg.loss_streak_pause_after):
+                                    bm = 1 if self.cfg.timeframe.lower().strip() == "1min" else 5
+                                    cool_secs = int(self.cfg.loss_streak_cooldown_bars) * bm * 60
+                                    self.store.set_cooldown_until(
+                                        key=self._job_id(),
+                                        cooldown_until=datetime.now(timezone.utc) + timedelta(seconds=cool_secs),
+                                    )
+                                    # Reset streak after triggering cooldown to avoid repeated triggers.
+                                    self.store.set_kv(
+                                        strategy_name=self.strategy_name,
+                                        figi=self.figi,
+                                        key="loss_streak",
+                                        value="0",
+                                    )
+                        except Exception:  # noqa: BLE001
+                            pass
                     self._clear_levels()
                 else:
                     direction = 1 if sig.target_qty > 0 else -1

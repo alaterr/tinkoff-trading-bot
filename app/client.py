@@ -172,6 +172,11 @@ class RuntimeClient:
         return "sandbox" if v else "real"
 
     async def set_credentials(self, *, token: str, sandbox: bool) -> None:
+        if (not sandbox) and (not settings.i_know_what_i_am_doing):
+            raise RuntimeError(
+                "Refusing to start REAL trading mode without explicit confirmation. "
+                "Set I_KNOW_WHAT_I_AM_DOING=true to enable real mode."
+            )
         # Swap client instance (best-effort close previous)
         self._token = token
         self._sandbox = sandbox
@@ -183,6 +188,11 @@ class RuntimeClient:
         if self._inner is None:
             if not self._token:
                 raise RuntimeError("TOKEN is not set. Provide it via .env or UI.")
+            if (not self._sandbox) and (not settings.i_know_what_i_am_doing):
+                raise RuntimeError(
+                    "Refusing to start REAL trading mode without explicit confirmation. "
+                    "Set I_KNOW_WHAT_I_AM_DOING=true to enable real mode."
+                )
             self._inner = TinkoffClient(token=self._token, sandbox=self._sandbox)
         return self._inner
 
